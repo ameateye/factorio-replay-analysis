@@ -551,6 +551,98 @@ function BufferAmounts.prototype.exportData(self)
 end
 return ____exports
  end,
+["dataCollectors.entity-layout"] = function(...) 
+local ____lualib = require("lualib_bundle")
+local __TS__Class = ____lualib.__TS__Class
+local ____exports = {}
+local ____tick = require("tick")
+local getTick = ____tick.getTick
+local FILTERS = {
+    {filter = "type", type = "transport-belt"},
+    {filter = "type", type = "underground-belt", mode = "or"},
+    {filter = "type", type = "splitter", mode = "or"},
+    {filter = "type", type = "inserter", mode = "or"},
+    {filter = "type", type = "electric-pole", mode = "or"}
+}
+local TYPE_TO_CATEGORY = {
+    ["transport-belt"] = "belt",
+    ["underground-belt"] = "belt",
+    splitter = "belt",
+    inserter = "inserter",
+    ["electric-pole"] = "pole"
+}
+____exports.default = __TS__Class()
+local EntityLayout = ____exports.default
+EntityLayout.name = "EntityLayout"
+function EntityLayout.prototype.____constructor(self)
+    self.prototypes = {}
+    self.entityData = {}
+end
+function EntityLayout.prototype.on_init(self)
+    for name in pairs(prototypes.get_entity_filtered(FILTERS)) do
+        self.prototypes[name] = true
+    end
+end
+function EntityLayout.prototype.onCreated(self, entity)
+    local unitNumber = entity.unit_number
+    if not unitNumber or not (self.prototypes[entity.name] ~= nil) then
+        return
+    end
+    local category = TYPE_TO_CATEGORY[entity.type]
+    if not category then
+        return
+    end
+    local record = {
+        name = entity.name,
+        unitNumber = unitNumber,
+        category = category,
+        location = entity.position,
+        direction = entity.direction,
+        timeBuilt = getTick()
+    }
+    if category == "belt" then
+        record.beltType = entity.type
+    end
+    self.entityData[unitNumber] = record
+end
+function EntityLayout.prototype.onRemoved(self, entity)
+    local unitNumber = entity.unit_number
+    if not unitNumber then
+        return
+    end
+    local data = self.entityData[unitNumber]
+    if not data then
+        return
+    end
+    data.timeRemoved = getTick()
+end
+function EntityLayout.prototype.on_built_entity(self, event)
+    self:onCreated(event.entity)
+end
+function EntityLayout.prototype.on_robot_built_entity(self, event)
+    self:onCreated(event.entity)
+end
+function EntityLayout.prototype.script_raised_built(self, event)
+    self:onCreated(event.entity)
+end
+function EntityLayout.prototype.on_pre_player_mined_item(self, event)
+    self:onRemoved(event.entity)
+end
+function EntityLayout.prototype.on_robot_pre_mined(self, event)
+    self:onRemoved(event.entity)
+end
+function EntityLayout.prototype.on_entity_died(self, event)
+    self:onRemoved(event.entity)
+end
+function EntityLayout.prototype.exportData(self)
+    local entities = {}
+    for ____, data in pairs(self.entityData) do
+        entities[#entities + 1] = data
+    end
+    return {entities = entities}
+end
+return ____exports
+ end,
 ["dataCollectors.lab-contents"] = function(...) 
 local ____lualib = require("lualib_bundle")
 local __TS__Class = ____lualib.__TS__Class
@@ -674,7 +766,7 @@ __TS__SparseArrayPush(
 local craftingMachineStatuses = ____list_to_map_1({__TS__SparseArraySpread(____array_0)})
 local ____list_to_map_3 = list_to_map
 local ____array_2 = __TS__SparseArrayNew(table.unpack(__TS__ObjectKeys(commonStatuses)))
-__TS__SparseArrayPush(____array_2, "no_ingredients")
+__TS__SparseArrayPush(____array_2, "no_ingredients", "full_output")
 local furnaceStatuses = ____list_to_map_3({__TS__SparseArraySpread(____array_2)})
 local reverseMap = {}
 for key, value in pairs(defines.entity_status) do
@@ -719,6 +811,7 @@ function MachineProduction.prototype.initialData(self, entity)
         name = entity.name,
         unitNumber = entity.unit_number,
         location = entity.position,
+        direction = entity.direction,
         timeBuilt = getTick(),
         lastProductsFinished = 0,
         lastConfig = nil,
@@ -922,6 +1015,7 @@ function MachineProduction.prototype.exportData(self)
                 name = machine.name,
                 unitNumber = machine.unitNumber,
                 location = machine.location,
+                direction = machine.direction,
                 timeBuilt = machine.timeBuilt,
                 recipes = recipes
             }
@@ -929,6 +1023,80 @@ function MachineProduction.prototype.exportData(self)
         ::__continue53::
     end
     return {period = self.nth_tick_period, machines = machines}
+end
+return ____exports
+ end,
+["dataCollectors.miner-activity"] = function(...) 
+local ____lualib = require("lualib_bundle")
+local __TS__Class = ____lualib.__TS__Class
+local __TS__ClassExtends = ____lualib.__TS__ClassExtends
+local ____exports = {}
+local ____tick = require("tick")
+local getTick = ____tick.getTick
+local ____entity_2Dtracker = require("dataCollectors.entity-tracker")
+local EntityTracker = ____entity_2Dtracker.default
+local reverseMap = {}
+for key, value in pairs(defines.entity_status) do
+    reverseMap[value] = key
+end
+local function getResourcesInRange(entity)
+    local proto = prototypes.entity[entity.name]
+    local radius = proto.mining_drill_radius or 2.5
+    local resources = entity.surface.find_entities_filtered({position = entity.position, radius = radius, type = "resource"})
+    local seen = {}
+    local out = {}
+    for ____, r in ipairs(resources) do
+        if not seen[r.name] then
+            seen[r.name] = true
+            out[#out + 1] = r.name
+        end
+    end
+    return out
+end
+____exports.default = __TS__Class()
+local MinerActivity = ____exports.default
+MinerActivity.name = "MinerActivity"
+__TS__ClassExtends(MinerActivity, EntityTracker)
+function MinerActivity.prototype.____constructor(self, nth_tick_period)
+    if nth_tick_period == nil then
+        nth_tick_period = 60 * 5
+    end
+    EntityTracker.prototype.____constructor(self, {filter = "type", type = "mining-drill"})
+    self.nth_tick_period = nth_tick_period
+end
+function MinerActivity.prototype.initialData(self, entity)
+    return {
+        name = entity.name,
+        unitNumber = entity.unit_number,
+        location = entity.position,
+        direction = entity.direction,
+        timeBuilt = getTick(),
+        resources = getResourcesInRange(entity),
+        statuses = {}
+    }
+end
+function MinerActivity.prototype.onDeleted(self, _entity, _event, data)
+    data.timeRemoved = getTick()
+end
+function MinerActivity.prototype.onPeriodicUpdate(self, entity, data)
+    local status = entity.status
+    local statusText = status ~= nil and (reverseMap[status] or "unknown") or "unknown"
+    local last = data.statuses[#data.statuses]
+    if last and last[2] == statusText then
+        return
+    end
+    local ____data_statuses_0 = data.statuses
+    ____data_statuses_0[#____data_statuses_0 + 1] = {
+        getTick(),
+        statusText
+    }
+end
+function MinerActivity.prototype.exportData(self)
+    local miners = {}
+    for ____, data in pairs(self.entityData) do
+        miners[#miners + 1] = data
+    end
+    return {period = self.nth_tick_period, miners = miners}
 end
 return ____exports
  end,
@@ -1183,10 +1351,14 @@ local addDataCollector = ____data_2Dcollector.addDataCollector
 local exportAllData = ____data_2Dcollector.exportAllData
 local ____buffer_2Damounts = require("dataCollectors.buffer-amounts")
 local BufferAmounts = ____buffer_2Damounts.default
+local ____entity_2Dlayout = require("dataCollectors.entity-layout")
+local EntityLayout = ____entity_2Dlayout.default
 local ____lab_2Dcontents = require("dataCollectors.lab-contents")
 local LabContents = ____lab_2Dcontents.default
 local ____machine_2Dproduction = require("dataCollectors.machine-production")
 local MachineProduction = ____machine_2Dproduction.default
+local ____miner_2Dactivity = require("dataCollectors.miner-activity")
+local MinerActivity = ____miner_2Dactivity.default
 local ____player_2Dinventory = require("dataCollectors.player-inventory")
 local PlayerInventory = ____player_2Dinventory.default
 local ____player_2Dposition = require("dataCollectors.player-position")
@@ -1211,6 +1383,8 @@ addDataCollector(__TS__New(MachineProduction, {
 }))
 addDataCollector(__TS__New(BufferAmounts))
 addDataCollector(__TS__New(LabContents))
+addDataCollector(__TS__New(EntityLayout))
+addDataCollector(__TS__New(MinerActivity))
 addDataCollector(__TS__New(ResearchTiming))
 addDataCollector(__TS__New(RocketLaunchTime))
 addDataCollector(__TS__New(RoboportUsage))

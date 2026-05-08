@@ -29,6 +29,7 @@ interface MachineData {
   name: string
   unitNumber: number
   location: MapPosition
+  direction: number
   timeBuilt: number
   recipes: MachineRecipeProduction[]
 }
@@ -103,7 +104,7 @@ const craftingMachineStatuses = list_to_map<string>([
   "full_output",
   "item_ingredient_shortage",
 ])
-const furnaceStatuses = list_to_map<string>([...commonStatuses, "no_ingredients"])
+const furnaceStatuses = list_to_map<string>([...commonStatuses, "no_ingredients", "full_output"])
 
 const reverseMap: Record<defines.entity_status, EntityStatus> = {}
 for (const [key, value] of pairs(defines.entity_status)) {
@@ -114,6 +115,7 @@ interface TrackedMachineData {
   name: string
   unitNumber: UnitNumber
   location: MapPosition
+  direction: number
   timeBuilt: number
   lastProductsFinished: number
   lastConfig?: MachineConfig
@@ -171,6 +173,7 @@ export default class MachineProduction
       name: entity.name,
       unitNumber: entity.unit_number!,
       location: entity.position,
+      direction: entity.direction,
       timeBuilt: getTick(),
       lastProductsFinished: 0,
       lastConfig: nil,
@@ -363,6 +366,7 @@ export default class MachineProduction
         name: machine.name,
         unitNumber: machine.unitNumber,
         location: machine.location,
+        direction: machine.direction,
         timeBuilt: machine.timeBuilt,
         recipes,
       })

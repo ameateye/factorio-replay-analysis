@@ -1,8 +1,10 @@
 import { add_lib } from "event_handler"
 import { addDataCollector, exportAllData } from "./data-collector"
 import BufferAmounts from "./dataCollectors/buffer-amounts"
+import EntityLayout from "./dataCollectors/entity-layout"
 import LabContents from "./dataCollectors/lab-contents"
 import MachineProduction from "./dataCollectors/machine-production"
+import MinerActivity from "./dataCollectors/miner-activity"
 import PlayerInventory from "./dataCollectors/player-inventory"
 import PlayerPosition from "./dataCollectors/player-position"
 import ResearchTiming from "./dataCollectors/research-timing"
@@ -26,6 +28,8 @@ addDataCollector(
 )
 addDataCollector(new BufferAmounts())
 addDataCollector(new LabContents())
+addDataCollector(new EntityLayout())
+addDataCollector(new MinerActivity())
 addDataCollector(new ResearchTiming())
 addDataCollector(new RocketLaunchTime())
 addDataCollector(new RoboportUsage())
