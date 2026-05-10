@@ -121,6 +121,12 @@ function arraysEqual(a: string[], b: string[]): boolean {
 }
 
 export default class EntityLayout implements DataCollector<EntityLayoutData>, EventHandlers {
+  manifest = {
+    schemaVersion: 1,
+    description:
+      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing plus post-build mutations (rotations, splitter config, inserter filters).",
+  }
+
   prototypes = new LuaSet<string>()
   entityData: Record<UnitNumber, LayoutEntity> = {}
 

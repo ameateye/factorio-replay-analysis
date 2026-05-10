@@ -10,6 +10,11 @@ interface PlayerPositionData {
 
 const floor = math.floor
 export default class PlayerPosition implements DataCollector<PlayerPositionData> {
+  manifest = {
+    schemaVersion: 1,
+    description: "Per-player (x, y) position rounded to integer tiles, sampled periodically.",
+  }
+
   constructor(public nth_tick_period: number = 60) {}
 
   players: Record<string, [x: number, y: number][]> = {}

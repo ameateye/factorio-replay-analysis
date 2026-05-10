@@ -28,6 +28,11 @@ const sciencePacks: string[] = [
 ]
 
 export default class LabContents extends EntityTracker<TrackedData> implements DataCollector<LabData> {
+  manifest = {
+    schemaVersion: 1,
+    description: "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples.",
+  }
+
   constructor(public nth_tick_period: number = 60) {
     super({ filter: "type", type: "lab" })
   }

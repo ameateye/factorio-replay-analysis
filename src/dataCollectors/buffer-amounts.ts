@@ -35,6 +35,11 @@ interface EntityData {
 }
 
 export default class BufferAmounts extends EntityTracker<EntityData> implements DataCollector<BufferData> {
+  manifest = {
+    schemaVersion: 1,
+    description: "Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer.",
+  }
+
   constructor(
     public nth_tick_period: number = 60 * 5,
     public minDataPointsToDetermineItem: number = 5,

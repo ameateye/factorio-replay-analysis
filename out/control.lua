@@ -262,9 +262,19 @@ function ____exports.exportAllData()
     for name, datum in pairs(storage.dataCollectors) do
         local outname = getOutFileName(name) .. ".json"
         log("Exporting " .. name)
+        local data = datum:exportData()
+        local ____name_6 = name
+        local ____opt_2 = datum.manifest
+        local ____temp_7 = ____opt_2 and ____opt_2.schemaVersion or 1
+        local ____opt_4 = datum.manifest
+        local manifest = {collector = ____name_6, schemaVersion = ____temp_7, description = ____opt_4 and ____opt_4.description or ""}
+        local wrapped = {manifest = manifest}
+        for k, v in pairs(data) do
+            wrapped[k] = v
+        end
         helpers.write_file(
             outname,
-            helpers.table_to_json(datum:exportData())
+            helpers.table_to_json(wrapped)
         )
     end
     log("Exported dataCollector data to script-output/*.json")
@@ -434,6 +444,7 @@ function BufferAmounts.prototype.____constructor(self, nth_tick_period, minDataP
     self.nth_tick_period = nth_tick_period
     self.minDataPointsToDetermineItem = minDataPointsToDetermineItem
     self.includeTanks = includeTanks
+    self.manifest = {schemaVersion = 1, description = "Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer."}
 end
 function BufferAmounts.prototype.initialData(self, entity)
     local ____type = entity.type == "storage-tank" and "tank" or "chest"
@@ -622,6 +633,7 @@ ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
 function EntityLayout.prototype.____constructor(self)
+    self.manifest = {schemaVersion = 1, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing plus post-build mutations (rotations, splitter config, inserter filters)."}
     self.prototypes = {}
     self.entityData = {}
 end
@@ -929,6 +941,7 @@ function LabContents.prototype.____constructor(self, nth_tick_period)
     end
     EntityTracker.prototype.____constructor(self, {filter = "type", type = "lab"})
     self.nth_tick_period = nth_tick_period
+    self.manifest = {schemaVersion = 1, description = "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples."}
 end
 function LabContents.prototype.initialData(self, entity)
     return {
@@ -1046,6 +1059,7 @@ function MachineProduction.prototype.____constructor(self, prototypes, nth_tick_
     end
     EntityTracker.prototype.____constructor(self, {filter = "name", name = prototypes})
     self.nth_tick_period = nth_tick_period
+    self.manifest = {schemaVersion = 1, description = "Per-recipe production runs on assemblers, furnaces, chemical plants, refineries, and rocket silos — products finished, crafting/productivity progress, and entity status sampled periodically."}
 end
 function MachineProduction.prototype.on_init(self)
     EntityTracker.prototype.on_init(self)
@@ -1327,6 +1341,7 @@ function MinerActivity.prototype.____constructor(self, nth_tick_period)
     end
     EntityTracker.prototype.____constructor(self, {filter = "type", type = "mining-drill"})
     self.nth_tick_period = nth_tick_period
+    self.manifest = {schemaVersion = 1, description = "Mining-drill statuses sampled periodically with location, direction, and the resources covered."}
 end
 function MinerActivity.prototype.initialData(self, entity)
     return {
@@ -1379,6 +1394,7 @@ function PlayerInventory.prototype.____constructor(self, nth_tick_period)
         nth_tick_period = 360
     end
     self.nth_tick_period = nth_tick_period
+    self.manifest = {schemaVersion = 1, description = "Per-player inventory snapshots, crafting queue snapshots, and crafting-finished events."}
     self.players = {}
 end
 function PlayerInventory.prototype.on_nth_tick(self, event)
@@ -1453,6 +1469,7 @@ function PlayerPosition.prototype.____constructor(self, nth_tick_period)
         nth_tick_period = 60
     end
     self.nth_tick_period = nth_tick_period
+    self.manifest = {schemaVersion = 1, description = "Per-player (x, y) position rounded to integer tiles, sampled periodically."}
     self.players = {}
 end
 function PlayerPosition.prototype.on_nth_tick(self, event)
@@ -1489,6 +1506,7 @@ ____exports.default = __TS__Class()
 local ResearchTiming = ____exports.default
 ResearchTiming.name = "ResearchTiming"
 function ResearchTiming.prototype.____constructor(self)
+    self.manifest = {schemaVersion = 1, description = "Tech research events (started / cancelled / completed) plus first-started and completed tick maps."}
     self.data = {timeFirstStarted = {}, timeCompleted = {}, events = {}}
 end
 function ResearchTiming.prototype.on_research_started(self, event)
@@ -1544,6 +1562,7 @@ function RoboportUsage.prototype.____constructor(self, nth_tick_period)
     end
     EntityTracker.prototype.____constructor(self, {filter = "type", type = "roboport"})
     self.nth_tick_period = nth_tick_period
+    self.manifest = {schemaVersion = 1, description = "Per-roboport charging and waiting bot counts sampled periodically; lifecycle includes removal reason."}
 end
 function RoboportUsage.prototype.initialData(self, entity, event)
     if not entity.logistic_cell then
@@ -1593,6 +1612,7 @@ ____exports.default = __TS__Class()
 local RocketLaunchTime = ____exports.default
 RocketLaunchTime.name = "RocketLaunchTime"
 function RocketLaunchTime.prototype.____constructor(self)
+    self.manifest = {schemaVersion = 1, description = "Tick of each rocket launch in the run."}
     self.launchTimes = {}
 end
 function RocketLaunchTime.prototype.on_rocket_launched(self, event)

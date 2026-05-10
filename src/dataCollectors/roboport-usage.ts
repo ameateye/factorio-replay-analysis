@@ -32,6 +32,11 @@ export default class RoboportUsage
   extends EntityTracker<TrackedRoboportData>
   implements DataCollector<RoboportUsageData>
 {
+  manifest = {
+    schemaVersion: 1,
+    description: "Per-roboport charging and waiting bot counts sampled periodically; lifecycle includes removal reason.",
+  }
+
   constructor(public nth_tick_period = 30) {
     super({
       filter: "type",

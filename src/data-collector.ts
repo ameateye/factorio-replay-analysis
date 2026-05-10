@@ -5,12 +5,25 @@ export type EventHandlers = {
   [K in keyof typeof defines.events]?: (this: unknown, event: (typeof defines.events)[K]["_eventData"]) => void
 }
 
+export interface CollectorManifest {
+  // Bumped when the output JSON's shape changes in a way that affects
+  // consumers. Pre-manifest extractions (no `manifest` field at all) should
+  // be treated as legacy by readers. See docs/outputs.md for the canonical
+  // per-version shape reference.
+  schemaVersion: number
+  // One-line description of what the output represents. Mirrors the
+  // section heading in docs/outputs.md.
+  description: string
+}
+
 export interface DataCollector<T extends object = object> extends EventHandlers {
   nth_tick_period?: number
 
   on_nth_tick?(event: NthTickEventData): void
 
   exportData(): T
+
+  manifest?: CollectorManifest
 
   constructor: {
     name: string
@@ -94,7 +107,17 @@ export function exportAllData(): void {
   for (const [name, datum] of pairs(storage.dataCollectors!)) {
     const outname = `${getOutFileName(name)}.json`
     log(`Exporting ${name}`)
-    helpers.write_file(outname, helpers.table_to_json(datum.exportData()))
+    const data = datum.exportData() as Record<string, unknown>
+    const manifest = {
+      collector: name,
+      schemaVersion: datum.manifest?.schemaVersion ?? 1,
+      description: datum.manifest?.description ?? "",
+    }
+    const wrapped: Record<string, unknown> = { manifest }
+    for (const [k, v] of pairs(data)) {
+      wrapped[k] = v
+    }
+    helpers.write_file(outname, helpers.table_to_json(wrapped))
   }
   log("Exported dataCollector data to script-output/*.json")
 }

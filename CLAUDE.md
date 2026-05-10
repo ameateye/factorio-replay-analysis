@@ -86,6 +86,11 @@ Collectors are instantiated and configured in `src/main.ts`.
 
 `exportAllData()` (in `src/data-collector.ts`):
 - Writes to `script-output/{collectorName}.json`
+- Wraps each collector's `exportData()` result with a `manifest` header (`collector`, `schemaVersion`, `description`) so output files are self-describing. Each collector should declare its own `manifest = { schemaVersion, description }` field. Bump `schemaVersion` when the output shape changes.
+
+**Output shape reference:**
+
+[docs/outputs.md](docs/outputs.md) documents every output JSON's shape and field semantics. Update it whenever you add a collector or change an output's shape.
 
 ## Key Technologies
 

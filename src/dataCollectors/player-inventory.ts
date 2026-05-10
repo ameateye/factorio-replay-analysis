@@ -19,6 +19,11 @@ interface TrackedPlayerData {
 }
 
 export default class PlayerInventory implements DataCollector<PlayerInventoryData> {
+  manifest = {
+    schemaVersion: 1,
+    description: "Per-player inventory snapshots, crafting queue snapshots, and crafting-finished events.",
+  }
+
   constructor(public nth_tick_period: number = 360) {}
 
   players: Record<string, TrackedPlayerData> = {}

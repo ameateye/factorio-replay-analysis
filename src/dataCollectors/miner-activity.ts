@@ -57,6 +57,11 @@ export default class MinerActivity
   extends EntityTracker<TrackedMinerData>
   implements DataCollector<MinerActivityData>
 {
+  manifest = {
+    schemaVersion: 1,
+    description: "Mining-drill statuses sampled periodically with location, direction, and the resources covered.",
+  }
+
   constructor(public nth_tick_period: number = 60 * 5) {
     super({ filter: "type", type: "mining-drill" })
   }

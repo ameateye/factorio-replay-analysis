@@ -137,6 +137,12 @@ export default class MachineProduction
   extends EntityTracker<TrackedMachineData>
   implements DataCollector<MachineProductionData>
 {
+  manifest = {
+    schemaVersion: 1,
+    description:
+      "Per-recipe production runs on assemblers, furnaces, chemical plants, refineries, and rocket silos — products finished, crafting/productivity progress, and entity status sampled periodically.",
+  }
+
   constructor(
     prototypes: string[],
     public nth_tick_period: number = 60 * 5,

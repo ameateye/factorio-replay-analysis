@@ -12,6 +12,11 @@ interface ResearchData {
 }
 
 export default class ResearchTiming implements DataCollector<ResearchData> {
+  manifest = {
+    schemaVersion: 1,
+    description: "Tech research events (started / cancelled / completed) plus first-started and completed tick maps.",
+  }
+
   data: ResearchData = {
     timeFirstStarted: {},
     timeCompleted: {},

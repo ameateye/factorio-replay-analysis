@@ -12,3 +12,5 @@ To use:
 - run `/export-replay-data`
 
 Optionally, data is also exported immediately after first rocket launch.
+
+For the shape and field semantics of every output JSON, see [docs/outputs.md](docs/outputs.md). Each output starts with a `manifest` header (`collector`, `schemaVersion`, `description`) so files are self-describing.
