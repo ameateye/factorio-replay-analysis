@@ -105,6 +105,17 @@ const craftingMachineStatuses = list_to_map<string>([
   "item_ingredient_shortage",
 ])
 const furnaceStatuses = list_to_map<string>([...commonStatuses, "no_ingredients", "full_output"])
+// Rocket silo cycles through extra states between rocket-part stages: it
+// crafts parts (item_ingredient_shortage / working / etc.), then goes
+// preparing → waiting → launching as the rocket leaves. Treat these as
+// non-stopping running states so we don't false-trigger configuration_changed.
+const rocketSiloStatuses = list_to_map<string>([
+  ...craftingMachineStatuses,
+  "preparing_rocket_for_launch",
+  "waiting_to_launch_rocket",
+  "waiting_for_space_in_platform_hub",
+  "launching_rocket",
+])
 
 const reverseMap: Record<defines.entity_status, EntityStatus> = {}
 for (const [key, value] of pairs(defines.entity_status)) {
@@ -149,11 +160,13 @@ export default class MachineProduction
 
   private getStatus(entity: LuaEntity): EntityStatus {
     const keys =
-      entity.type == "assembling-machine" || entity.type == "rocket-silo"
-        ? craftingMachineStatuses
-        : entity.type == "furnace"
-          ? furnaceStatuses
-          : error("Invalid entity type")
+      entity.type == "rocket-silo"
+        ? rocketSiloStatuses
+        : entity.type == "assembling-machine"
+          ? craftingMachineStatuses
+          : entity.type == "furnace"
+            ? furnaceStatuses
+            : error("Invalid entity type")
 
     const status = entity.status
     if (status == nil) return "unknown"

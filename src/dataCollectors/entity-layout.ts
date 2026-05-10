@@ -1,5 +1,6 @@
 import {
   EntityPrototypeFilterWrite,
+  ItemFilter,
   LuaEntity,
   MapPosition,
   OnBuiltEntityEvent,
@@ -19,14 +20,17 @@ import { getTick } from "../tick"
 type EntityCategory = "belt" | "inserter" | "pole"
 type BeltSubtype = "transport-belt" | "underground-belt" | "splitter"
 type Priority = "left" | "none" | "right"
+type FilterMode = "whitelist" | "blacklist"
 
 // One post-build state change. Either a rotation (direction + optional
-// beltToGroundType for UG flips) or a splitter-config change. A single
-// mutation only carries the fields that actually changed; downstream
-// readers fold mutations forward in tick order to recover state at time T.
+// beltToGroundType for UG flips), a splitter-config change, or an
+// inserter-filter change. A single mutation only carries the fields that
+// actually changed; downstream readers fold mutations forward in tick
+// order to recover state at time T.
 //
 // splitterFilter uses "" to mean "filter cleared" — Factorio item names are
-// non-empty kebab-case so empty string is a safe sentinel.
+// non-empty kebab-case so empty string is a safe sentinel. Inserter filters
+// use an empty array to mean "all slots cleared".
 interface MutationEvent {
   tick: number
   direction?: number
@@ -34,6 +38,9 @@ interface MutationEvent {
   splitterInputPriority?: Priority
   splitterOutputPriority?: Priority
   splitterFilter?: string
+  inserterUseFilters?: boolean
+  inserterFilterMode?: FilterMode
+  inserterFilters?: string[]
 }
 
 interface LayoutEntity {
@@ -51,6 +58,12 @@ interface LayoutEntity {
   splitterInputPriority?: Priority
   splitterOutputPriority?: Priority
   splitterFilter?: string
+  // Inserters only — initial state at build. inserterFilterMode distinguishes
+  // whitelist (only allow listed items) from blacklist (allow everything
+  // except listed). Filters are inactive when inserterUseFilters is false.
+  inserterUseFilters?: boolean
+  inserterFilterMode?: FilterMode
+  inserterFilters?: string[]
   mutations?: MutationEvent[]
 }
 
@@ -81,6 +94,30 @@ function readSplitterFilterName(entity: LuaEntity): string | undefined {
   const name = f.name
   if (name == nil) return undefined
   return name.name
+}
+
+function readInserterFilters(entity: LuaEntity): string[] {
+  const slots = entity.filter_slot_count
+  const result: string[] = []
+  for (const i of $range(1, slots)) {
+    const f = entity.get_filter(i) as ItemFilter | undefined
+    if (f == nil) continue
+    if (typeof f === "string") {
+      result.push(f)
+    } else {
+      const name = f.name
+      if (name != nil) result.push(name.name)
+    }
+  }
+  return result
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length != b.length) return false
+  for (const i of $range(0, a.length - 1)) {
+    if (a[i] != b[i]) return false
+  }
+  return true
 }
 
 export default class EntityLayout implements DataCollector<EntityLayoutData>, EventHandlers {
@@ -144,6 +181,11 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
         const filter = readSplitterFilterName(entity)
         if (filter != undefined) record.splitterFilter = filter
       }
+    } else if (category == "inserter") {
+      record.inserterUseFilters = entity.use_filters
+      const mode = entity.inserter_filter_mode
+      if (mode != undefined) record.inserterFilterMode = mode
+      record.inserterFilters = readInserterFilters(entity)
     }
     this.entityData[unitNumber] = record
   }
@@ -194,6 +236,41 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     this.appendMutation(data, mutation)
   }
 
+  private latestInserterState(data: LayoutEntity): {
+    useFilters: boolean
+    mode: FilterMode | undefined
+    filters: string[]
+  } {
+    let useFilters: boolean = data.inserterUseFilters ?? false
+    let mode: FilterMode | undefined = data.inserterFilterMode
+    let filters: string[] = data.inserterFilters ?? []
+    if (data.mutations) {
+      for (const m of data.mutations) {
+        if (m.inserterUseFilters != undefined) useFilters = m.inserterUseFilters
+        if (m.inserterFilterMode != undefined) mode = m.inserterFilterMode
+        if (m.inserterFilters != undefined) filters = m.inserterFilters
+      }
+    }
+    return { useFilters, mode, filters }
+  }
+
+  private snapshotInserterIfChanged(data: LayoutEntity, entity: LuaEntity) {
+    if (data.category != "inserter") return
+    const useFilters = entity.use_filters
+    const mode = entity.inserter_filter_mode
+    const filters = readInserterFilters(entity)
+    const last = this.latestInserterState(data)
+    const dUse = useFilters != last.useFilters
+    const dMode = mode != last.mode
+    const dFilters = !arraysEqual(filters, last.filters)
+    if (!dUse && !dMode && !dFilters) return
+    const mutation: MutationEvent = { tick: getTick() }
+    if (dUse) mutation.inserterUseFilters = useFilters
+    if (dMode && mode != undefined) mutation.inserterFilterMode = mode
+    if (dFilters) mutation.inserterFilters = filters
+    this.appendMutation(data, mutation)
+  }
+
   on_built_entity(event: OnBuiltEntityEvent) {
     this.onCreated(event.entity)
   }
@@ -233,8 +310,12 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     const unitNumber = entity.unit_number
     if (!unitNumber) return
     const data = this.entityData[unitNumber]
-    if (!data || data.beltType != "splitter") return
-    this.snapshotSplitterIfChanged(data, entity)
+    if (!data) return
+    if (data.beltType == "splitter") {
+      this.snapshotSplitterIfChanged(data, entity)
+    } else if (data.category == "inserter") {
+      this.snapshotInserterIfChanged(data, entity)
+    }
   }
 
   on_entity_settings_pasted(event: OnEntitySettingsPastedEvent) {
@@ -246,6 +327,8 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     if (!data) return
     if (data.beltType == "splitter") {
       this.snapshotSplitterIfChanged(data, entity)
+    } else if (data.category == "inserter") {
+      this.snapshotInserterIfChanged(data, entity)
     }
   }
 

@@ -24,6 +24,7 @@ addDataCollector(
     "oil-refinery",
     "stone-furnace",
     "steel-furnace",
+    "rocket-silo",
   ]),
 )
 addDataCollector(new BufferAmounts())

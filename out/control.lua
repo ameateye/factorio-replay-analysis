@@ -585,6 +585,39 @@ local function readSplitterFilterName(entity)
     end
     return name.name
 end
+local function readInserterFilters(entity)
+    local slots = entity.filter_slot_count
+    local result = {}
+    for i = 1, slots do
+        do
+            local f = entity.get_filter(i)
+            if f == nil then
+                goto __continue7
+            end
+            if type(f) == "string" then
+                result[#result + 1] = f
+            else
+                local name = f.name
+                if name ~= nil then
+                    result[#result + 1] = name.name
+                end
+            end
+        end
+        ::__continue7::
+    end
+    return result
+end
+local function arraysEqual(a, b)
+    if #a ~= #b then
+        return false
+    end
+    for i = 0, #a - 1 do
+        if a[i + 1] ~= b[i + 1] then
+            return false
+        end
+    end
+    return true
+end
 ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
@@ -608,10 +641,10 @@ function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
     for ____, data in pairs(self.entityData) do
         do
             if data.unitNumber == newUnitNumber then
-                goto __continue10
+                goto __continue20
             end
             if data.timeRemoved ~= nil then
-                goto __continue10
+                goto __continue20
             end
             local px = data.location.x
             local py = data.location.y
@@ -619,7 +652,7 @@ function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
                 data.timeRemoved = tick
             end
         end
-        ::__continue10::
+        ::__continue20::
     end
 end
 function EntityLayout.prototype.onCreated(self, entity)
@@ -653,6 +686,13 @@ function EntityLayout.prototype.onCreated(self, entity)
                 record.splitterFilter = filter
             end
         end
+    elseif category == "inserter" then
+        record.inserterUseFilters = entity.use_filters
+        local mode = entity.inserter_filter_mode
+        if mode ~= nil then
+            record.inserterFilterMode = mode
+        end
+        record.inserterFilters = readInserterFilters(entity)
     end
     self.entityData[unitNumber] = record
 end
@@ -721,6 +761,55 @@ function EntityLayout.prototype.snapshotSplitterIfChanged(self, data, entity)
     end
     self:appendMutation(data, mutation)
 end
+function EntityLayout.prototype.latestInserterState(self, data)
+    local ____data_inserterUseFilters_1 = data.inserterUseFilters
+    if ____data_inserterUseFilters_1 == nil then
+        ____data_inserterUseFilters_1 = false
+    end
+    local useFilters = ____data_inserterUseFilters_1
+    local mode = data.inserterFilterMode
+    local filters = data.inserterFilters or ({})
+    if data.mutations then
+        for ____, m in ipairs(data.mutations) do
+            if m.inserterUseFilters ~= nil then
+                useFilters = m.inserterUseFilters
+            end
+            if m.inserterFilterMode ~= nil then
+                mode = m.inserterFilterMode
+            end
+            if m.inserterFilters ~= nil then
+                filters = m.inserterFilters
+            end
+        end
+    end
+    return {useFilters = useFilters, mode = mode, filters = filters}
+end
+function EntityLayout.prototype.snapshotInserterIfChanged(self, data, entity)
+    if data.category ~= "inserter" then
+        return
+    end
+    local useFilters = entity.use_filters
+    local mode = entity.inserter_filter_mode
+    local filters = readInserterFilters(entity)
+    local last = self:latestInserterState(data)
+    local dUse = useFilters ~= last.useFilters
+    local dMode = mode ~= last.mode
+    local dFilters = not arraysEqual(filters, last.filters)
+    if not dUse and not dMode and not dFilters then
+        return
+    end
+    local mutation = {tick = getTick()}
+    if dUse then
+        mutation.inserterUseFilters = useFilters
+    end
+    if dMode and mode ~= nil then
+        mutation.inserterFilterMode = mode
+    end
+    if dFilters then
+        mutation.inserterFilters = filters
+    end
+    self:appendMutation(data, mutation)
+end
 function EntityLayout.prototype.on_built_entity(self, event)
     self:onCreated(event.entity)
 end
@@ -771,10 +860,14 @@ function EntityLayout.prototype.on_gui_closed(self, event)
         return
     end
     local data = self.entityData[unitNumber]
-    if not data or data.beltType ~= "splitter" then
+    if not data then
         return
     end
-    self:snapshotSplitterIfChanged(data, entity)
+    if data.beltType == "splitter" then
+        self:snapshotSplitterIfChanged(data, entity)
+    elseif data.category == "inserter" then
+        self:snapshotInserterIfChanged(data, entity)
+    end
 end
 function EntityLayout.prototype.on_entity_settings_pasted(self, event)
     local entity = event.destination
@@ -791,6 +884,8 @@ function EntityLayout.prototype.on_entity_settings_pasted(self, event)
     end
     if data.beltType == "splitter" then
         self:snapshotSplitterIfChanged(data, entity)
+    elseif data.category == "inserter" then
+        self:snapshotInserterIfChanged(data, entity)
     end
 end
 function EntityLayout.prototype.exportData(self)
@@ -927,6 +1022,16 @@ local ____list_to_map_3 = list_to_map
 local ____array_2 = __TS__SparseArrayNew(table.unpack(__TS__ObjectKeys(commonStatuses)))
 __TS__SparseArrayPush(____array_2, "no_ingredients", "full_output")
 local furnaceStatuses = ____list_to_map_3({__TS__SparseArraySpread(____array_2)})
+local ____list_to_map_5 = list_to_map
+local ____array_4 = __TS__SparseArrayNew(table.unpack(__TS__ObjectKeys(craftingMachineStatuses)))
+__TS__SparseArrayPush(
+    ____array_4,
+    "preparing_rocket_for_launch",
+    "waiting_to_launch_rocket",
+    "waiting_for_space_in_platform_hub",
+    "launching_rocket"
+)
+local rocketSiloStatuses = ____list_to_map_5({__TS__SparseArraySpread(____array_4)})
 local reverseMap = {}
 for key, value in pairs(defines.entity_status) do
     reverseMap[value] = key
@@ -950,7 +1055,7 @@ function MachineProduction.prototype.on_init(self)
     end
 end
 function MachineProduction.prototype.getStatus(self, entity)
-    local keys = (entity.type == "assembling-machine" or entity.type == "rocket-silo") and craftingMachineStatuses or (entity.type == "furnace" and furnaceStatuses or error("Invalid entity type"))
+    local keys = entity.type == "rocket-silo" and rocketSiloStatuses or (entity.type == "assembling-machine" and craftingMachineStatuses or (entity.type == "furnace" and furnaceStatuses or error("Invalid entity type")))
     local status = entity.status
     if status == nil then
         return "unknown"
@@ -1031,8 +1136,8 @@ function MachineProduction.prototype.addDataPoint(self, entity, info, status)
         end
         extraInfo = missingIngredients
     end
-    local ____currentConfig_production_4 = currentConfig.production
-    ____currentConfig_production_4[#____currentConfig_production_4 + 1] = {
+    local ____currentConfig_production_6 = currentConfig.production
+    ____currentConfig_production_6[#____currentConfig_production_6 + 1] = {
         tick,
         delta,
         craftingProgress,
@@ -1066,8 +1171,8 @@ function MachineProduction.prototype.markProductionFinished(self, entity, info, 
 end
 function MachineProduction.prototype.startNewProduction(self, info, config)
     info.lastConfig = config
-    local ____info_recipeProduction_5 = info.recipeProduction
-    ____info_recipeProduction_5[#____info_recipeProduction_5 + 1] = {
+    local ____info_recipeProduction_7 = info.recipeProduction
+    ____info_recipeProduction_7[#____info_recipeProduction_7 + 1] = {
         recipe = config.recipe,
         craftingSpeed = config.craftingSpeed,
         productivityBonus = config.productivityBonus,
@@ -1086,18 +1191,18 @@ function MachineProduction.prototype.checkRunningChanged(self, entity, info, sta
         status = self:getStatus(entity)
     end
     local isStopped = knownStopReason ~= nil or isStoppingStatus(status)
-    local ____temp_11 = (entity.get_recipe())
-    if ____temp_11 == nil then
-        local ____temp_10
+    local ____temp_13 = (entity.get_recipe())
+    if ____temp_13 == nil then
+        local ____temp_12
         if entity.type == "furnace" then
-            local ____opt_8 = entity.previous_recipe
-            ____temp_10 = ____opt_8 and ____opt_8.name
+            local ____opt_10 = entity.previous_recipe
+            ____temp_12 = ____opt_10 and ____opt_10.name
         else
-            ____temp_10 = nil
+            ____temp_12 = nil
         end
-        ____temp_11 = ____temp_10
+        ____temp_13 = ____temp_12
     end
-    local recipe = ____temp_11 and ____temp_11.name
+    local recipe = ____temp_13 and ____temp_13.name
     local lastConfig = info.lastConfig
     local config = recipe and ({recipe = recipe, craftingSpeed = entity.crafting_speed, productivityBonus = entity.productivity_bonus}) or nil
     local configChanged = not nullableEqual(lastConfig, config, machineConfigEqual)
@@ -1538,7 +1643,8 @@ addDataCollector(__TS__New(MachineProduction, {
     "chemical-plant",
     "oil-refinery",
     "stone-furnace",
-    "steel-furnace"
+    "steel-furnace",
+    "rocket-silo"
 }))
 addDataCollector(__TS__New(BufferAmounts))
 addDataCollector(__TS__New(LabContents))
