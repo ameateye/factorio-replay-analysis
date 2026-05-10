@@ -571,6 +571,20 @@ local TYPE_TO_CATEGORY = {
     inserter = "inserter",
     ["electric-pole"] = "pole"
 }
+local function readSplitterFilterName(entity)
+    local f = entity.splitter_filter
+    if f == nil then
+        return nil
+    end
+    if type(f) == "string" then
+        return f
+    end
+    local name = f.name
+    if name == nil then
+        return nil
+    end
+    return name.name
+end
 ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
@@ -583,6 +597,31 @@ function EntityLayout.prototype.on_init(self)
         self.prototypes[name] = true
     end
 end
+function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
+    local box = newEntity.bounding_box
+    local inset = 0.1
+    local minX = box.left_top.x + inset
+    local maxX = box.right_bottom.x - inset
+    local minY = box.left_top.y + inset
+    local maxY = box.right_bottom.y - inset
+    local tick = getTick()
+    for ____, data in pairs(self.entityData) do
+        do
+            if data.unitNumber == newUnitNumber then
+                goto __continue10
+            end
+            if data.timeRemoved ~= nil then
+                goto __continue10
+            end
+            local px = data.location.x
+            local py = data.location.y
+            if px > minX and px < maxX and py > minY and py < maxY then
+                data.timeRemoved = tick
+            end
+        end
+        ::__continue10::
+    end
+end
 function EntityLayout.prototype.onCreated(self, entity)
     local unitNumber = entity.unit_number
     if not unitNumber or not (self.prototypes[entity.name] ~= nil) then
@@ -592,6 +631,7 @@ function EntityLayout.prototype.onCreated(self, entity)
     if not category then
         return
     end
+    self:markOverbuiltAt(entity, unitNumber)
     local record = {
         name = entity.name,
         unitNumber = unitNumber,
@@ -601,7 +641,18 @@ function EntityLayout.prototype.onCreated(self, entity)
         timeBuilt = getTick()
     }
     if category == "belt" then
-        record.beltType = entity.type
+        local beltType = entity.type
+        record.beltType = beltType
+        if beltType == "underground-belt" then
+            record.beltToGroundType = entity.belt_to_ground_type
+        elseif beltType == "splitter" then
+            record.splitterInputPriority = entity.splitter_input_priority
+            record.splitterOutputPriority = entity.splitter_output_priority
+            local filter = readSplitterFilterName(entity)
+            if filter ~= nil then
+                record.splitterFilter = filter
+            end
+        end
     end
     self.entityData[unitNumber] = record
 end
@@ -614,7 +665,61 @@ function EntityLayout.prototype.onRemoved(self, entity)
     if not data then
         return
     end
-    data.timeRemoved = getTick()
+    if data.timeRemoved == nil then
+        data.timeRemoved = getTick()
+    end
+end
+function EntityLayout.prototype.appendMutation(self, data, mutation)
+    if not data.mutations then
+        data.mutations = {}
+    end
+    local ____data_mutations_0 = data.mutations
+    ____data_mutations_0[#____data_mutations_0 + 1] = mutation
+end
+function EntityLayout.prototype.latestSplitterState(self, data)
+    local input = data.splitterInputPriority or "none"
+    local output = data.splitterOutputPriority or "none"
+    local filter = data.splitterFilter or ""
+    if data.mutations then
+        for ____, m in ipairs(data.mutations) do
+            if m.splitterInputPriority ~= nil then
+                input = m.splitterInputPriority
+            end
+            if m.splitterOutputPriority ~= nil then
+                output = m.splitterOutputPriority
+            end
+            if m.splitterFilter ~= nil then
+                filter = m.splitterFilter
+            end
+        end
+    end
+    return {input = input, output = output, filter = filter}
+end
+function EntityLayout.prototype.snapshotSplitterIfChanged(self, data, entity)
+    if data.beltType ~= "splitter" then
+        return
+    end
+    local inputPrio = entity.splitter_input_priority
+    local outputPrio = entity.splitter_output_priority
+    local filter = readSplitterFilterName(entity) or ""
+    local last = self:latestSplitterState(data)
+    local dInput = inputPrio ~= last.input
+    local dOutput = outputPrio ~= last.output
+    local dFilter = filter ~= last.filter
+    if not dInput and not dOutput and not dFilter then
+        return
+    end
+    local mutation = {tick = getTick()}
+    if dInput then
+        mutation.splitterInputPriority = inputPrio
+    end
+    if dOutput then
+        mutation.splitterOutputPriority = outputPrio
+    end
+    if dFilter then
+        mutation.splitterFilter = filter
+    end
+    self:appendMutation(data, mutation)
 end
 function EntityLayout.prototype.on_built_entity(self, event)
     self:onCreated(event.entity)
@@ -633,6 +738,60 @@ function EntityLayout.prototype.on_robot_pre_mined(self, event)
 end
 function EntityLayout.prototype.on_entity_died(self, event)
     self:onRemoved(event.entity)
+end
+function EntityLayout.prototype.on_player_rotated_entity(self, event)
+    local entity = event.entity
+    if not entity.valid then
+        return
+    end
+    local unitNumber = entity.unit_number
+    if not unitNumber then
+        return
+    end
+    local data = self.entityData[unitNumber]
+    if not data then
+        return
+    end
+    local mutation = {
+        tick = getTick(),
+        direction = entity.direction
+    }
+    if data.beltType == "underground-belt" then
+        mutation.beltToGroundType = entity.belt_to_ground_type
+    end
+    self:appendMutation(data, mutation)
+end
+function EntityLayout.prototype.on_gui_closed(self, event)
+    local entity = event.entity
+    if not entity or not entity.valid then
+        return
+    end
+    local unitNumber = entity.unit_number
+    if not unitNumber then
+        return
+    end
+    local data = self.entityData[unitNumber]
+    if not data or data.beltType ~= "splitter" then
+        return
+    end
+    self:snapshotSplitterIfChanged(data, entity)
+end
+function EntityLayout.prototype.on_entity_settings_pasted(self, event)
+    local entity = event.destination
+    if not entity or not entity.valid then
+        return
+    end
+    local unitNumber = entity.unit_number
+    if not unitNumber then
+        return
+    end
+    local data = self.entityData[unitNumber]
+    if not data then
+        return
+    end
+    if data.beltType == "splitter" then
+        self:snapshotSplitterIfChanged(data, entity)
+    end
 end
 function EntityLayout.prototype.exportData(self)
     local entities = {}
