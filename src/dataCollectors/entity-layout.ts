@@ -87,13 +87,23 @@ const TYPE_TO_CATEGORY: Record<string, EntityCategory> = {
   "electric-pole": "pole",
 }
 
+// ItemFilter.name is typed as LuaItemPrototype by typed-factorio, but Factorio's
+// ItemID union is actually `string | LuaItemPrototype | LuaItemStack | LuaItem`,
+// and at runtime get_filter / splitter_filter return the plain string form. The
+// userdata branch is kept defensively in case the runtime ever returns one.
+function itemIdToName(id: unknown): string | undefined {
+  if (id == nil) return undefined
+  if (typeof id === "string") return id
+  const n = (id as { name?: unknown }).name
+  if (typeof n === "string") return n
+  return undefined
+}
+
 function readSplitterFilterName(entity: LuaEntity): string | undefined {
   const f = entity.splitter_filter
   if (f == nil) return undefined
   if (typeof f === "string") return f
-  const name = f.name
-  if (name == nil) return undefined
-  return name.name
+  return itemIdToName(f.name)
 }
 
 function readInserterFilters(entity: LuaEntity): string[] {
@@ -105,8 +115,8 @@ function readInserterFilters(entity: LuaEntity): string[] {
     if (typeof f === "string") {
       result.push(f)
     } else {
-      const name = f.name
-      if (name != nil) result.push(name.name)
+      const name = itemIdToName(f.name)
+      if (name != undefined) result.push(name)
     }
   }
   return result

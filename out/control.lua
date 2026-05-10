@@ -582,6 +582,19 @@ local TYPE_TO_CATEGORY = {
     inserter = "inserter",
     ["electric-pole"] = "pole"
 }
+local function itemIdToName(id)
+    if id == nil then
+        return nil
+    end
+    if type(id) == "string" then
+        return id
+    end
+    local n = id.name
+    if type(n) == "string" then
+        return n
+    end
+    return nil
+end
 local function readSplitterFilterName(entity)
     local f = entity.splitter_filter
     if f == nil then
@@ -590,11 +603,7 @@ local function readSplitterFilterName(entity)
     if type(f) == "string" then
         return f
     end
-    local name = f.name
-    if name == nil then
-        return nil
-    end
-    return name.name
+    return itemIdToName(f.name)
 end
 local function readInserterFilters(entity)
     local slots = entity.filter_slot_count
@@ -603,18 +612,18 @@ local function readInserterFilters(entity)
         do
             local f = entity.get_filter(i)
             if f == nil then
-                goto __continue7
+                goto __continue10
             end
             if type(f) == "string" then
                 result[#result + 1] = f
             else
-                local name = f.name
+                local name = itemIdToName(f.name)
                 if name ~= nil then
-                    result[#result + 1] = name.name
+                    result[#result + 1] = name
                 end
             end
         end
-        ::__continue7::
+        ::__continue10::
     end
     return result
 end
@@ -653,10 +662,10 @@ function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
     for ____, data in pairs(self.entityData) do
         do
             if data.unitNumber == newUnitNumber then
-                goto __continue20
+                goto __continue23
             end
             if data.timeRemoved ~= nil then
-                goto __continue20
+                goto __continue23
             end
             local px = data.location.x
             local py = data.location.y
@@ -664,7 +673,7 @@ function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
                 data.timeRemoved = tick
             end
         end
-        ::__continue20::
+        ::__continue23::
     end
 end
 function EntityLayout.prototype.onCreated(self, entity)
