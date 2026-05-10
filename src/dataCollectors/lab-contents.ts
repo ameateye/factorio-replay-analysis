@@ -1,4 +1,11 @@
-import { LuaEntity, MapPosition, nil } from "factorio:runtime"
+import {
+  LuaEntity,
+  MapPosition,
+  nil,
+  OnEntityDiedEvent,
+  OnPrePlayerMinedItemEvent,
+  OnRobotPreMinedEvent,
+} from "factorio:runtime"
 import { DataCollector } from "../data-collector"
 import { getTick } from "../tick"
 import EntityTracker from "./entity-tracker"
@@ -14,6 +21,7 @@ interface TrackedData {
   unitNumber: number
   location: MapPosition
   timeBuilt: number
+  timeRemoved?: number
   packs: [time: number, ...packCounts: number[]][]
 }
 
@@ -29,8 +37,8 @@ const sciencePacks: string[] = [
 
 export default class LabContents extends EntityTracker<TrackedData> implements DataCollector<LabData> {
   manifest = {
-    schemaVersion: 1,
-    description: "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples.",
+    schemaVersion: 2,
+    description: "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples. timeRemoved is set on the lab record when the entity is mined or dies.",
   }
 
   constructor(public nth_tick_period: number = 60) {
@@ -45,6 +53,14 @@ export default class LabContents extends EntityTracker<TrackedData> implements D
       timeBuilt: getTick(),
       packs: [],
     }
+  }
+
+  protected override onDeleted(
+    _entity: LuaEntity,
+    _event: OnPrePlayerMinedItemEvent | OnRobotPreMinedEvent | OnEntityDiedEvent,
+    data: TrackedData,
+  ) {
+    data.timeRemoved = getTick()
   }
 
   protected override onPeriodicUpdate(entity: LuaEntity, data: TrackedData) {

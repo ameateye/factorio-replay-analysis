@@ -950,7 +950,7 @@ function LabContents.prototype.____constructor(self, nth_tick_period)
     end
     EntityTracker.prototype.____constructor(self, {filter = "type", type = "lab"})
     self.nth_tick_period = nth_tick_period
-    self.manifest = {schemaVersion = 1, description = "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples."}
+    self.manifest = {schemaVersion = 2, description = "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples. timeRemoved is set on the lab record when the entity is mined or dies."}
 end
 function LabContents.prototype.initialData(self, entity)
     return {
@@ -960,6 +960,9 @@ function LabContents.prototype.initialData(self, entity)
         timeBuilt = getTick(),
         packs = {}
     }
+end
+function LabContents.prototype.onDeleted(self, _entity, _event, data)
+    data.timeRemoved = getTick()
 end
 function LabContents.prototype.onPeriodicUpdate(self, entity, data)
     local get_item_count = entity.get_inventory(defines.inventory.lab_input).get_item_count
@@ -1068,7 +1071,7 @@ function MachineProduction.prototype.____constructor(self, prototypes, nth_tick_
     end
     EntityTracker.prototype.____constructor(self, {filter = "name", name = prototypes})
     self.nth_tick_period = nth_tick_period
-    self.manifest = {schemaVersion = 1, description = "Per-recipe production runs on assemblers, furnaces, chemical plants, refineries, and rocket silos — products finished, crafting/productivity progress, and entity status sampled periodically."}
+    self.manifest = {schemaVersion = 2, description = "Per-recipe production runs on assemblers, furnaces, chemical plants, refineries, and rocket silos — products finished, crafting/productivity progress, and entity status sampled periodically. timeRemoved is set on the machine record when the entity is mined or dies."}
 end
 function MachineProduction.prototype.on_init(self)
     EntityTracker.prototype.on_init(self)
@@ -1247,6 +1250,7 @@ function MachineProduction.prototype.checkRunningChanged(self, entity, info, sta
 end
 function MachineProduction.prototype.onDeleted(self, entity, event, info)
     self:checkRunningChanged(entity, info, nil, event.name == defines.events.on_entity_died and "entity_died" or "mined")
+    info.timeRemoved = getTick()
 end
 function MachineProduction.prototype.on_marked_for_deconstruction(self, event)
     self:tryCheckRunningChanged(event.entity, "marked_for_deconstruction")
@@ -1304,6 +1308,7 @@ function MachineProduction.prototype.exportData(self)
                 location = machine.location,
                 direction = machine.direction,
                 timeBuilt = machine.timeBuilt,
+                timeRemoved = machine.timeRemoved,
                 recipes = recipes
             }
         end

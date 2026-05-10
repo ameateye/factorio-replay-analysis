@@ -31,6 +31,7 @@ interface MachineData {
   location: MapPosition
   direction: number
   timeBuilt: number
+  timeRemoved?: number
   recipes: MachineRecipeProduction[]
 }
 
@@ -128,6 +129,7 @@ interface TrackedMachineData {
   location: MapPosition
   direction: number
   timeBuilt: number
+  timeRemoved?: number
   lastProductsFinished: number
   lastConfig?: MachineConfig
   recipeProduction: MachineRecipeProduction[]
@@ -138,9 +140,9 @@ export default class MachineProduction
   implements DataCollector<MachineProductionData>
 {
   manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     description:
-      "Per-recipe production runs on assemblers, furnaces, chemical plants, refineries, and rocket silos — products finished, crafting/productivity progress, and entity status sampled periodically.",
+      "Per-recipe production runs on assemblers, furnaces, chemical plants, refineries, and rocket silos — products finished, crafting/productivity progress, and entity status sampled periodically. timeRemoved is set on the machine record when the entity is mined or dies.",
   }
 
   constructor(
@@ -330,6 +332,7 @@ export default class MachineProduction
     info: TrackedMachineData,
   ) {
     this.checkRunningChanged(entity, info, nil, event.name == defines.events.on_entity_died ? "entity_died" : "mined")
+    info.timeRemoved = getTick()
   }
 
   on_marked_for_deconstruction(event: OnMarkedForDeconstructionEvent) {
@@ -387,6 +390,7 @@ export default class MachineProduction
         location: machine.location,
         direction: machine.direction,
         timeBuilt: machine.timeBuilt,
+        timeRemoved: machine.timeRemoved,
         recipes,
       })
     }
