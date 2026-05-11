@@ -34,11 +34,11 @@ Every output JSON starts with a `manifest` field describing the file:
 
 ## entityLayout.json
 
-Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing plus post-build mutations (rotations, splitter config, inserter filters).
+Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters). Inserter pickup / drop targets are **not** captured here — derive them downstream from the inserter's `location` + `direction` + prototype reach.
 
 ```ts
 {
-  manifest,
+  manifest,                   // schemaVersion: 2
   entities: LayoutEntity[]
 }
 
@@ -67,6 +67,17 @@ LayoutEntity = {
   inserterFilterMode?: "whitelist" | "blacklist"
   inserterFilters?: string[]  // item names per slot
 
+  // Belts only — runtime adjacency at build time. beltInputs / beltOutputs
+  // are sorted unit_number arrays from LuaEntity.belt_neighbours; an empty
+  // array means "no connection on that side". undergroundPair is the paired
+  // UG entity's unit_number for underground-belts only (0 = unpaired).
+  // These reflect Factorio's own belt graph (turns, sideloads, splitter
+  // sides, UG pairings) and can shift post-build as neighbouring entities
+  // are added or removed; updates land in mutations[].
+  beltInputs?: number[]
+  beltOutputs?: number[]
+  undergroundPair?: number
+
   // Post-build state changes folded forward in tick order. Each mutation
   // carries only the fields that changed in that event.
   mutations?: Array<{
@@ -79,6 +90,9 @@ LayoutEntity = {
     inserterUseFilters?: boolean
     inserterFilterMode?: "whitelist" | "blacklist"
     inserterFilters?: string[]
+    beltInputs?: number[]
+    beltOutputs?: number[]
+    undergroundPair?: number
   }>
 }
 ```
@@ -86,6 +100,13 @@ LayoutEntity = {
 Notes:
 - To get state at time T, start from the build-time fields and apply each mutation with `tick ≤ T` in order.
 - The collector defensively marks entities as removed when a newly-built entity's bounding box covers their position (with a 0.1 tile inset). This catches splitter-over-two-belts and any fast-replace path where mined events don't fire.
+- `beltInputs` / `beltOutputs` / `undergroundPair` capture what `LuaEntity.belt_neighbours` and `LuaEntity.neighbours` report at build / change time — including turns and sideloads (encoded as which adjacent belts appear in inputs/outputs) and splitter side-connections. They do **not** capture Factorio's per-lane transport-line segmentation; consumers wanting lane-level item identity must derive it themselves.
+- Belt-graph rescans cover a radius of ~11 tiles around any built/removed/rotated belt-category entity, enough for vanilla underground reach (express UG = 9). Modded longer-reach undergrounds may have some pair updates missed at this radius.
+
+### Schema history
+
+- **v2** — Added belt-graph snapshots (`beltInputs`, `beltOutputs`, `undergroundPair`) on both `LayoutEntity` and `MutationEvent`.
+- **v1** — Initial release: build/remove timing + rotation / splitter-config / inserter-filter mutations.
 
 ## machineProduction.json
 

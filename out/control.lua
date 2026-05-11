@@ -638,13 +638,24 @@ local function arraysEqual(a, b)
     end
     return true
 end
+local function anyInSet(arr, set)
+    for ____, x in ipairs(arr) do
+        if set[x] ~= nil then
+            return true
+        end
+    end
+    return false
+end
 ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
 function EntityLayout.prototype.____constructor(self)
-    self.manifest = {schemaVersion = 1, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing plus post-build mutations (rotations, splitter config, inserter filters)."}
+    self.manifest = {schemaVersion = 2, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters)."}
     self.prototypes = {}
     self.entityData = {}
+    self.adjCache = {}
+    self.splitterConfigCache = {}
+    self.inserterConfigCache = {}
 end
 function EntityLayout.prototype.on_init(self)
     for name in pairs(prototypes.get_entity_filtered(FILTERS)) do
@@ -652,29 +663,26 @@ function EntityLayout.prototype.on_init(self)
     end
 end
 function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
-    local box = newEntity.bounding_box
+    local b = newEntity.bounding_box
     local inset = 0.1
-    local minX = box.left_top.x + inset
-    local maxX = box.right_bottom.x - inset
-    local minY = box.left_top.y + inset
-    local maxY = box.right_bottom.y - inset
-    local tick = getTick()
+    local overbuilt = {}
     for ____, data in pairs(self.entityData) do
         do
             if data.unitNumber == newUnitNumber then
-                goto __continue23
+                goto __continue27
             end
             if data.timeRemoved ~= nil then
-                goto __continue23
+                goto __continue27
             end
-            local px = data.location.x
-            local py = data.location.y
-            if px > minX and px < maxX and py > minY and py < maxY then
-                data.timeRemoved = tick
+            local p = data.location
+            if p.x > b.left_top.x + inset and p.x < b.right_bottom.x - inset and p.y > b.left_top.y + inset and p.y < b.right_bottom.y - inset then
+                self:setTimeRemoved(data)
+                overbuilt[#overbuilt + 1] = data.unitNumber
             end
         end
-        ::__continue23::
+        ::__continue27::
     end
+    return overbuilt
 end
 function EntityLayout.prototype.onCreated(self, entity)
     local unitNumber = entity.unit_number
@@ -685,7 +693,7 @@ function EntityLayout.prototype.onCreated(self, entity)
     if not category then
         return
     end
-    self:markOverbuiltAt(entity, unitNumber)
+    local overbuiltUids = self:markOverbuiltAt(entity, unitNumber)
     local record = {
         name = entity.name,
         unitNumber = unitNumber,
@@ -706,7 +714,15 @@ function EntityLayout.prototype.onCreated(self, entity)
             if filter ~= nil then
                 record.splitterFilter = filter
             end
+            self.splitterConfigCache[unitNumber] = {input = record.splitterInputPriority or "none", output = record.splitterOutputPriority or "none", filter = record.splitterFilter or ""}
         end
+        local adj = self:readBeltAdjacency(entity)
+        record.beltInputs = adj.inputs
+        record.beltOutputs = adj.outputs
+        if beltType == "underground-belt" then
+            record.undergroundPair = adj.pair
+        end
+        self.adjCache[unitNumber] = adj
     elseif category == "inserter" then
         record.inserterUseFilters = entity.use_filters
         local mode = entity.inserter_filter_mode
@@ -714,18 +730,36 @@ function EntityLayout.prototype.onCreated(self, entity)
             record.inserterFilterMode = mode
         end
         record.inserterFilters = readInserterFilters(entity)
+        local ____self_inserterConfigCache_1 = self.inserterConfigCache
+        local ____record_inserterUseFilters_0 = record.inserterUseFilters
+        if ____record_inserterUseFilters_0 == nil then
+            ____record_inserterUseFilters_0 = false
+        end
+        ____self_inserterConfigCache_1[unitNumber] = {useFilters = ____record_inserterUseFilters_0, mode = record.inserterFilterMode, filters = record.inserterFilters or ({})}
     end
     self.entityData[unitNumber] = record
+    if category == "belt" then
+        self:rescanArea(entity.surface, entity, overbuiltUids)
+    end
 end
 function EntityLayout.prototype.onRemoved(self, entity)
+    if not entity.valid then
+        return
+    end
     local unitNumber = entity.unit_number
-    if not unitNumber then
+    if unitNumber == nil then
         return
     end
     local data = self.entityData[unitNumber]
     if not data then
         return
     end
+    self:setTimeRemoved(data)
+    if data.category == "belt" then
+        self:rescanArea(entity.surface, entity)
+    end
+end
+function EntityLayout.prototype.setTimeRemoved(self, data)
     if data.timeRemoved == nil then
         data.timeRemoved = getTick()
     end
@@ -734,102 +768,186 @@ function EntityLayout.prototype.appendMutation(self, data, mutation)
     if not data.mutations then
         data.mutations = {}
     end
-    local ____data_mutations_0 = data.mutations
-    ____data_mutations_0[#____data_mutations_0 + 1] = mutation
-end
-function EntityLayout.prototype.latestSplitterState(self, data)
-    local input = data.splitterInputPriority or "none"
-    local output = data.splitterOutputPriority or "none"
-    local filter = data.splitterFilter or ""
-    if data.mutations then
-        for ____, m in ipairs(data.mutations) do
-            if m.splitterInputPriority ~= nil then
-                input = m.splitterInputPriority
-            end
-            if m.splitterOutputPriority ~= nil then
-                output = m.splitterOutputPriority
-            end
-            if m.splitterFilter ~= nil then
-                filter = m.splitterFilter
-            end
-        end
-    end
-    return {input = input, output = output, filter = filter}
+    local ____data_mutations_2 = data.mutations
+    ____data_mutations_2[#____data_mutations_2 + 1] = mutation
 end
 function EntityLayout.prototype.snapshotSplitterIfChanged(self, data, entity)
     if data.beltType ~= "splitter" then
         return
     end
-    local inputPrio = entity.splitter_input_priority
-    local outputPrio = entity.splitter_output_priority
-    local filter = readSplitterFilterName(entity) or ""
-    local last = self:latestSplitterState(data)
-    local dInput = inputPrio ~= last.input
-    local dOutput = outputPrio ~= last.output
-    local dFilter = filter ~= last.filter
+    local last = self.splitterConfigCache[data.unitNumber]
+    if last == nil then
+        return
+    end
+    local cur = {
+        input = entity.splitter_input_priority,
+        output = entity.splitter_output_priority,
+        filter = readSplitterFilterName(entity) or ""
+    }
+    local dInput = cur.input ~= last.input
+    local dOutput = cur.output ~= last.output
+    local dFilter = cur.filter ~= last.filter
     if not dInput and not dOutput and not dFilter then
         return
     end
-    local mutation = {tick = getTick()}
+    local m = {tick = getTick()}
     if dInput then
-        mutation.splitterInputPriority = inputPrio
+        m.splitterInputPriority = cur.input
     end
     if dOutput then
-        mutation.splitterOutputPriority = outputPrio
+        m.splitterOutputPriority = cur.output
     end
     if dFilter then
-        mutation.splitterFilter = filter
+        m.splitterFilter = cur.filter
     end
-    self:appendMutation(data, mutation)
-end
-function EntityLayout.prototype.latestInserterState(self, data)
-    local ____data_inserterUseFilters_1 = data.inserterUseFilters
-    if ____data_inserterUseFilters_1 == nil then
-        ____data_inserterUseFilters_1 = false
-    end
-    local useFilters = ____data_inserterUseFilters_1
-    local mode = data.inserterFilterMode
-    local filters = data.inserterFilters or ({})
-    if data.mutations then
-        for ____, m in ipairs(data.mutations) do
-            if m.inserterUseFilters ~= nil then
-                useFilters = m.inserterUseFilters
-            end
-            if m.inserterFilterMode ~= nil then
-                mode = m.inserterFilterMode
-            end
-            if m.inserterFilters ~= nil then
-                filters = m.inserterFilters
-            end
-        end
-    end
-    return {useFilters = useFilters, mode = mode, filters = filters}
+    self:appendMutation(data, m)
+    self.splitterConfigCache[data.unitNumber] = cur
 end
 function EntityLayout.prototype.snapshotInserterIfChanged(self, data, entity)
     if data.category ~= "inserter" then
         return
     end
-    local useFilters = entity.use_filters
-    local mode = entity.inserter_filter_mode
-    local filters = readInserterFilters(entity)
-    local last = self:latestInserterState(data)
-    local dUse = useFilters ~= last.useFilters
-    local dMode = mode ~= last.mode
-    local dFilters = not arraysEqual(filters, last.filters)
+    local last = self.inserterConfigCache[data.unitNumber]
+    if last == nil then
+        return
+    end
+    local cur = {
+        useFilters = entity.use_filters,
+        mode = entity.inserter_filter_mode,
+        filters = readInserterFilters(entity)
+    }
+    local dUse = cur.useFilters ~= last.useFilters
+    local dMode = cur.mode ~= last.mode
+    local dFilters = not arraysEqual(cur.filters, last.filters)
     if not dUse and not dMode and not dFilters then
         return
     end
-    local mutation = {tick = getTick()}
+    local m = {tick = getTick()}
     if dUse then
-        mutation.inserterUseFilters = useFilters
+        m.inserterUseFilters = cur.useFilters
     end
-    if dMode and mode ~= nil then
-        mutation.inserterFilterMode = mode
+    if dMode and cur.mode ~= nil then
+        m.inserterFilterMode = cur.mode
     end
     if dFilters then
-        mutation.inserterFilters = filters
+        m.inserterFilters = cur.filters
     end
-    self:appendMutation(data, mutation)
+    self:appendMutation(data, m)
+    self.inserterConfigCache[data.unitNumber] = cur
+end
+function EntityLayout.prototype.isTombstoned(self, u)
+    local d = self.entityData[u]
+    return d ~= nil and d.timeRemoved ~= nil
+end
+function EntityLayout.prototype.readBeltAdjacency(self, entity)
+    local inputs = {}
+    for ____, e in ipairs(entity.belt_neighbours.inputs) do
+        do
+            local u = e.unit_number
+            if u == nil then
+                goto __continue67
+            end
+            if self:isTombstoned(u) then
+                goto __continue67
+            end
+            inputs[#inputs + 1] = u
+        end
+        ::__continue67::
+    end
+    table.sort(inputs)
+    local outputs = {}
+    for ____, e in ipairs(entity.belt_neighbours.outputs) do
+        do
+            local u = e.unit_number
+            if u == nil then
+                goto __continue71
+            end
+            if self:isTombstoned(u) then
+                goto __continue71
+            end
+            outputs[#outputs + 1] = u
+        end
+        ::__continue71::
+    end
+    table.sort(outputs)
+    local pair = 0
+    if entity.type == "underground-belt" then
+        local n = entity.neighbours
+        if n ~= nil and n.valid then
+            local u = n.unit_number
+            if u ~= nil and not self:isTombstoned(u) then
+                pair = u
+            end
+        end
+    end
+    return {inputs = inputs, outputs = outputs, pair = pair}
+end
+function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
+    if alsoLost == nil then
+        alsoLost = {}
+    end
+    if not surface.valid or not trigger.valid then
+        return
+    end
+    local triggerUid = trigger.unit_number
+    if triggerUid == nil then
+        return
+    end
+    local bbox = trigger.bounding_box
+    local tick = getTick()
+    local isTriggerUg = trigger.type == "underground-belt"
+    local lostUids = {}
+    lostUids[triggerUid] = true
+    for ____, u in ipairs(alsoLost) do
+        lostUids[u] = true
+    end
+    local triggerRefs = {}
+    for ____, e in ipairs(trigger.belt_neighbours.inputs) do
+        if e.unit_number ~= nil then
+            triggerRefs[e.unit_number] = true
+        end
+    end
+    for ____, e in ipairs(trigger.belt_neighbours.outputs) do
+        if e.unit_number ~= nil then
+            triggerRefs[e.unit_number] = true
+        end
+    end
+    if isTriggerUg then
+        local n = trigger.neighbours
+        if n ~= nil and n.valid and n.unit_number ~= nil then
+            triggerRefs[n.unit_number] = true
+        end
+    end
+    local beltR = ____exports.default.BELT_RESCAN_RADIUS
+    local beltArea = {left_top = {x = bbox.left_top.x - beltR, y = bbox.left_top.y - beltR}, right_bottom = {x = bbox.right_bottom.x + beltR, y = bbox.right_bottom.y + beltR}}
+    for ____, c in ipairs(surface.find_entities_filtered({area = beltArea, type = {"transport-belt", "underground-belt", "splitter"}})) do
+        do
+            local u = c.unit_number
+            if u == nil or u == triggerUid then
+                goto __continue91
+            end
+            local d = self.entityData[u]
+            if not d or d.timeRemoved ~= nil then
+                goto __continue91
+            end
+            local isUgPair = isTriggerUg and c.type == "underground-belt"
+            if not isUgPair then
+                local last = self.adjCache[u]
+                local wasRelated = last ~= nil and (anyInSet(last.inputs, lostUids) or anyInSet(last.outputs, lostUids) or lostUids[last.pair] ~= nil)
+                if not (triggerRefs[u] ~= nil) and not wasRelated then
+                    goto __continue91
+                end
+            end
+            local adj = self:readBeltAdjacency(c)
+            local m = {tick = tick, beltInputs = adj.inputs, beltOutputs = adj.outputs}
+            if c.type == "underground-belt" then
+                m.undergroundPair = adj.pair
+            end
+            self:appendMutation(d, m)
+            self.adjCache[u] = adj
+        end
+        ::__continue91::
+    end
 end
 function EntityLayout.prototype.on_built_entity(self, event)
     self:onCreated(event.entity)
@@ -869,45 +987,43 @@ function EntityLayout.prototype.on_player_rotated_entity(self, event)
     if data.beltType == "underground-belt" then
         mutation.beltToGroundType = entity.belt_to_ground_type
     end
+    if data.category == "belt" then
+        local adj = self:readBeltAdjacency(entity)
+        mutation.beltInputs = adj.inputs
+        mutation.beltOutputs = adj.outputs
+        if data.beltType == "underground-belt" then
+            mutation.undergroundPair = adj.pair
+        end
+        self.adjCache[unitNumber] = adj
+    end
     self:appendMutation(data, mutation)
+    if data.category == "belt" then
+        self:rescanArea(entity.surface, entity)
+    end
+end
+function EntityLayout.prototype.snapshotConfig(self, entity)
+    if not entity or not entity.valid then
+        return
+    end
+    local u = entity.unit_number
+    if not u then
+        return
+    end
+    local data = self.entityData[u]
+    if not data then
+        return
+    end
+    if data.beltType == "splitter" then
+        self:snapshotSplitterIfChanged(data, entity)
+    elseif data.category == "inserter" then
+        self:snapshotInserterIfChanged(data, entity)
+    end
 end
 function EntityLayout.prototype.on_gui_closed(self, event)
-    local entity = event.entity
-    if not entity or not entity.valid then
-        return
-    end
-    local unitNumber = entity.unit_number
-    if not unitNumber then
-        return
-    end
-    local data = self.entityData[unitNumber]
-    if not data then
-        return
-    end
-    if data.beltType == "splitter" then
-        self:snapshotSplitterIfChanged(data, entity)
-    elseif data.category == "inserter" then
-        self:snapshotInserterIfChanged(data, entity)
-    end
+    self:snapshotConfig(event.entity)
 end
 function EntityLayout.prototype.on_entity_settings_pasted(self, event)
-    local entity = event.destination
-    if not entity or not entity.valid then
-        return
-    end
-    local unitNumber = entity.unit_number
-    if not unitNumber then
-        return
-    end
-    local data = self.entityData[unitNumber]
-    if not data then
-        return
-    end
-    if data.beltType == "splitter" then
-        self:snapshotSplitterIfChanged(data, entity)
-    elseif data.category == "inserter" then
-        self:snapshotInserterIfChanged(data, entity)
-    end
+    self:snapshotConfig(event.destination)
 end
 function EntityLayout.prototype.exportData(self)
     local entities = {}
@@ -916,6 +1032,7 @@ function EntityLayout.prototype.exportData(self)
     end
     return {entities = entities}
 end
+EntityLayout.BELT_RESCAN_RADIUS = 11
 return ____exports
  end,
 ["dataCollectors.lab-contents"] = function(...) 
