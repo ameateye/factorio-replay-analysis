@@ -650,7 +650,7 @@ ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
 function EntityLayout.prototype.____constructor(self)
-    self.manifest = {schemaVersion = 2, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters)."}
+    self.manifest = {schemaVersion = 3, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle)."}
     self.prototypes = {}
     self.entityData = {}
     self.adjCache = {}
@@ -693,6 +693,38 @@ function EntityLayout.prototype.onCreated(self, entity)
     if not category then
         return
     end
+    local existing = self.entityData[unitNumber]
+    if existing ~= nil then
+        local p = entity.position
+        local sameIdentity = existing.name == entity.name and existing.location.x == p.x and existing.location.y == p.y
+        if sameIdentity and existing.timeRemoved ~= nil then
+            if not existing.revivals then
+                existing.revivals = {}
+            end
+            local ____existing_revivals_0 = existing.revivals
+            ____existing_revivals_0[#____existing_revivals_0 + 1] = {
+                died = existing.timeRemoved,
+                revived = getTick()
+            }
+            existing.timeRemoved = nil
+            if existing.category == "belt" then
+                local adj = self:readBeltAdjacency(entity)
+                local m = {
+                    tick = getTick(),
+                    beltInputs = adj.inputs,
+                    beltOutputs = adj.outputs
+                }
+                if existing.beltType == "underground-belt" then
+                    m.undergroundPair = adj.pair
+                end
+                self:appendMutation(existing, m)
+                self.adjCache[unitNumber] = adj
+                self:rescanArea(entity.surface, entity)
+            end
+            return
+        end
+        log((((((((((((("[WARN] EntityLayout: unexpected duplicate onCreated tick=" .. tostring(getTick())) .. " u=") .. tostring(unitNumber)) .. " ") .. entity.name) .. " @ (") .. tostring(p.x)) .. ",") .. tostring(p.y)) .. ") ") .. ((((("existing: name=" .. existing.name) .. " loc=(") .. tostring(existing.location.x)) .. ",") .. tostring(existing.location.y)) .. ") ") .. ((("timeBuilt=" .. tostring(existing.timeBuilt)) .. " timeRemoved=") .. tostring(existing.timeRemoved or "nil")) .. " ") .. "sameIdentity=" .. tostring(sameIdentity))
+    end
     local overbuiltUids = self:markOverbuiltAt(entity, unitNumber)
     local record = {
         name = entity.name,
@@ -730,12 +762,12 @@ function EntityLayout.prototype.onCreated(self, entity)
             record.inserterFilterMode = mode
         end
         record.inserterFilters = readInserterFilters(entity)
-        local ____self_inserterConfigCache_1 = self.inserterConfigCache
-        local ____record_inserterUseFilters_0 = record.inserterUseFilters
-        if ____record_inserterUseFilters_0 == nil then
-            ____record_inserterUseFilters_0 = false
+        local ____self_inserterConfigCache_2 = self.inserterConfigCache
+        local ____record_inserterUseFilters_1 = record.inserterUseFilters
+        if ____record_inserterUseFilters_1 == nil then
+            ____record_inserterUseFilters_1 = false
         end
-        ____self_inserterConfigCache_1[unitNumber] = {useFilters = ____record_inserterUseFilters_0, mode = record.inserterFilterMode, filters = record.inserterFilters or ({})}
+        ____self_inserterConfigCache_2[unitNumber] = {useFilters = ____record_inserterUseFilters_1, mode = record.inserterFilterMode, filters = record.inserterFilters or ({})}
     end
     self.entityData[unitNumber] = record
     if category == "belt" then
@@ -752,6 +784,10 @@ function EntityLayout.prototype.onRemoved(self, entity)
     end
     local data = self.entityData[unitNumber]
     if not data then
+        if self.prototypes[entity.name] ~= nil then
+            local p = entity.position
+            log(((((((((("[WARN] EntityLayout: onRemoved for untracked entity tick=" .. tostring(getTick())) .. " u=") .. tostring(unitNumber)) .. " ") .. entity.name) .. " @ (") .. tostring(p.x)) .. ",") .. tostring(p.y)) .. ")")
+        end
         return
     end
     self:setTimeRemoved(data)
@@ -768,8 +804,8 @@ function EntityLayout.prototype.appendMutation(self, data, mutation)
     if not data.mutations then
         data.mutations = {}
     end
-    local ____data_mutations_2 = data.mutations
-    ____data_mutations_2[#____data_mutations_2 + 1] = mutation
+    local ____data_mutations_3 = data.mutations
+    ____data_mutations_3[#____data_mutations_3 + 1] = mutation
 end
 function EntityLayout.prototype.snapshotSplitterIfChanged(self, data, entity)
     if data.beltType ~= "splitter" then
@@ -845,14 +881,14 @@ function EntityLayout.prototype.readBeltAdjacency(self, entity)
         do
             local u = e.unit_number
             if u == nil then
-                goto __continue67
+                goto __continue73
             end
             if self:isTombstoned(u) then
-                goto __continue67
+                goto __continue73
             end
             inputs[#inputs + 1] = u
         end
-        ::__continue67::
+        ::__continue73::
     end
     table.sort(inputs)
     local outputs = {}
@@ -860,14 +896,14 @@ function EntityLayout.prototype.readBeltAdjacency(self, entity)
         do
             local u = e.unit_number
             if u == nil then
-                goto __continue71
+                goto __continue77
             end
             if self:isTombstoned(u) then
-                goto __continue71
+                goto __continue77
             end
             outputs[#outputs + 1] = u
         end
-        ::__continue71::
+        ::__continue77::
     end
     table.sort(outputs)
     local pair = 0
@@ -924,18 +960,18 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
         do
             local u = c.unit_number
             if u == nil or u == triggerUid then
-                goto __continue91
+                goto __continue97
             end
             local d = self.entityData[u]
             if not d or d.timeRemoved ~= nil then
-                goto __continue91
+                goto __continue97
             end
             local isUgPair = isTriggerUg and c.type == "underground-belt"
             if not isUgPair then
                 local last = self.adjCache[u]
                 local wasRelated = last ~= nil and (anyInSet(last.inputs, lostUids) or anyInSet(last.outputs, lostUids) or lostUids[last.pair] ~= nil)
                 if not (triggerRefs[u] ~= nil) and not wasRelated then
-                    goto __continue91
+                    goto __continue97
                 end
             end
             local adj = self:readBeltAdjacency(c)
@@ -946,7 +982,7 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
             self:appendMutation(d, m)
             self.adjCache[u] = adj
         end
-        ::__continue91::
+        ::__continue97::
     end
 end
 function EntityLayout.prototype.on_built_entity(self, event)

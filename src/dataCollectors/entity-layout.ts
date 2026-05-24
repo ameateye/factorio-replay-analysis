@@ -62,6 +62,11 @@ interface LayoutEntity {
   direction: number
   timeBuilt: number
   timeRemoved?: number
+  // Death + bot-revive cycles. Factorio preserves unit_number across the
+  // ghost-revive cycle (so wires / station references survive a biter
+  // attack), and consumers should treat the entity as continuously existing
+  // — but the gap is recorded here for analytics that care.
+  revivals?: { died: number; revived: number }[]
   // Underground belts only — initial state at build (rotation flips it).
   beltToGroundType?: "input" | "output"
   // Splitters only — initial state at build.
@@ -158,9 +163,9 @@ function anyInSet(arr: number[], set: LuaSet<number>): boolean {
 
 export default class EntityLayout implements DataCollector<EntityLayoutData>, EventHandlers {
   manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     description:
-      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters).",
+      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle).",
   }
 
   prototypes = new LuaSet<string>()
@@ -214,6 +219,44 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     if (!unitNumber || !this.prototypes.has(entity.name)) return
     const category = TYPE_TO_CATEGORY[entity.type]
     if (!category) return
+
+    // Revive path: Factorio's death→ghost→bot-revive cycle preserves the
+    // entity's unit_number so circuit wires / station references survive
+    // a biter attack. If we already have a tombstoned record at this uid
+    // with matching identity, this is a revive — preserve the original
+    // timeBuilt and record the gap in revivals[].
+    const existing = this.entityData[unitNumber]
+    if (existing != undefined) {
+      const p = entity.position
+      const sameIdentity = existing.name == entity.name && existing.location.x == p.x && existing.location.y == p.y
+      if (sameIdentity && existing.timeRemoved != undefined) {
+        if (!existing.revivals) existing.revivals = []
+        existing.revivals.push({ died: existing.timeRemoved, revived: getTick() })
+        existing.timeRemoved = undefined
+        // Belt graph is re-evaluated by the engine on revive; capture the
+        // post-revive adjacency as a mutation so consumers can fold it
+        // forward like any other graph change.
+        if (existing.category == "belt") {
+          const adj = this.readBeltAdjacency(entity)
+          const m: MutationEvent = { tick: getTick(), beltInputs: adj.inputs, beltOutputs: adj.outputs }
+          if (existing.beltType == "underground-belt") m.undergroundPair = adj.pair
+          this.appendMutation(existing, m)
+          this.adjCache[unitNumber] = adj
+          this.rescanArea(entity.surface, entity)
+        }
+        return
+      }
+      // Identity mismatch or duplicate-while-alive: shouldn't happen under
+      // Factorio's invariants (unit_numbers are unique, and a uid we already
+      // hold should only re-enter via the revive path above). Log and fall
+      // through to overwrite so we don't silently lose the new entity.
+      log(
+        `[WARN] EntityLayout: unexpected duplicate onCreated tick=${getTick()} u=${unitNumber} ${entity.name} @ (${p.x},${p.y}) ` +
+          `existing: name=${existing.name} loc=(${existing.location.x},${existing.location.y}) ` +
+          `timeBuilt=${existing.timeBuilt} timeRemoved=${existing.timeRemoved ?? "nil"} ` +
+          `sameIdentity=${sameIdentity}`,
+      )
+    }
 
     const overbuiltUids = this.markOverbuiltAt(entity, unitNumber)
 
@@ -277,7 +320,18 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     const unitNumber = entity.unit_number
     if (unitNumber == undefined) return
     const data = this.entityData[unitNumber]
-    if (!data) return
+    if (!data) {
+      // Remove event for a uid we never recorded a build for. Under Factorio's
+      // invariants this shouldn't happen for prototypes we track; log so we
+      // notice if a new build event path slips through the filter.
+      if (this.prototypes.has(entity.name)) {
+        const p = entity.position
+        log(
+          `[WARN] EntityLayout: onRemoved for untracked entity tick=${getTick()} u=${unitNumber} ${entity.name} @ (${p.x},${p.y})`,
+        )
+      }
+      return
+    }
     this.setTimeRemoved(data)
     if (data.category == "belt") this.rescanArea(entity.surface, entity)
   }

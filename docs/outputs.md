@@ -38,7 +38,7 @@ Belts, splitters, undergrounds, inserters, and electric poles — built/removed 
 
 ```ts
 {
-  manifest,                   // schemaVersion: 2
+  manifest,                   // schemaVersion: 3
   entities: LayoutEntity[]
 }
 
@@ -49,8 +49,18 @@ LayoutEntity = {
   beltType?: "transport-belt" | "underground-belt" | "splitter"
   location: { x, y }
   direction: number           // build-time direction; later rotations live in mutations[]
-  timeBuilt: number
+  timeBuilt: number           // tick of the ORIGINAL build; survives revivals
   timeRemoved?: number
+
+  // Death + bot-revive cycles. Factorio's death→ghost→bot-revive flow
+  // preserves unit_number (so circuit wires / station references survive
+  // a biter attack), so a single LayoutEntity can span multiple death/
+  // revive intervals. Consumers should treat the entity as continuously
+  // existing for belt-graph / connectivity purposes; the gaps are recorded
+  // here only for analytics that care. Belt-graph re-evaluation on revive
+  // lands in mutations[] just like any other adjacency change.
+  // Undefined for entities never destroyed.
+  revivals?: { died: number; revived: number }[]
 
   // Underground belts only — initial state at build (rotation flips it).
   beltToGroundType?: "input" | "output"
@@ -105,6 +115,7 @@ Notes:
 
 ### Schema history
 
+- **v3** — Added `revivals[]`. `timeBuilt` now records the ORIGINAL build tick across death/revive cycles (previously it was overwritten with the latest revive tick because Factorio reuses the entity's unit_number on bot-revive).
 - **v2** — Added belt-graph snapshots (`beltInputs`, `beltOutputs`, `undergroundPair`) on both `LayoutEntity` and `MutationEvent`.
 - **v1** — Initial release: build/remove timing + rotation / splitter-config / inserter-filter mutations.
 
