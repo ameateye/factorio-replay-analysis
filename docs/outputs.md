@@ -36,9 +36,11 @@ Every output JSON starts with a `manifest` field describing the file:
 
 Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters). Inserter pickup / drop targets are **not** captured here — derive them downstream from the inserter's `location` + `direction` + prototype reach.
 
+Belt-category **ghosts** are tracked too (flagged `ghost: true`): a ghost belt participates in the engine belt graph — it sideloads and is reported in real neighbours' `belt_neighbours` — so its connection *and its later removal* (cancel or revive) are recorded, otherwise the real entity keeps a stale neighbour reference. Consumers that only want material flow can filter on the `ghost` flag.
+
 ```ts
 {
-  manifest,                   // schemaVersion: 3
+  manifest,                   // schemaVersion: 4
   entities: LayoutEntity[]
 }
 
@@ -46,6 +48,7 @@ LayoutEntity = {
   name: string                // prototype name, e.g. "fast-transport-belt"
   unitNumber: number
   category: "belt" | "inserter" | "pole"
+  ghost?: boolean             // present only on entity-ghosts (not yet revived). Only belt-category ghosts are tracked; name/beltType carry the would-be real prototype. See section intro.
   beltType?: "transport-belt" | "underground-belt" | "splitter"
   location: { x, y }
   direction: number           // build-time direction; later rotations live in mutations[]

@@ -10,6 +10,7 @@ import {
   OnEntitySettingsPastedEvent,
   OnGuiClosedEvent,
   OnPlayerRotatedEntityEvent,
+  OnPreGhostDeconstructedEvent,
   OnPrePlayerMinedItemEvent,
   OnRobotBuiltEntityEvent,
   OnRobotPreMinedEvent,
@@ -57,6 +58,14 @@ interface LayoutEntity {
   name: string
   unitNumber: number
   category: EntityCategory
+  // Entity-ghost (not yet revived). Ghost belts still participate in the engine
+  // belt graph — they sideload and are reported in real neighbours'
+  // belt_neighbours — so they're tracked to record both the connection AND its
+  // removal. Without tracking, a cancelled ghost leaves a stale neighbour
+  // reference on the real entity. Only belt-category ghosts are tracked;
+  // consumers wanting material flow only can filter on this flag. name/beltType
+  // carry the would-be real prototype. Absent on real entities.
+  ghost?: boolean
   beltType?: BeltSubtype
   location: MapPosition
   direction: number
@@ -163,9 +172,9 @@ function anyInSet(arr: number[], set: LuaSet<number>): boolean {
 
 export default class EntityLayout implements DataCollector<EntityLayoutData>, EventHandlers {
   manifest = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     description:
-      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle).",
+      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived.",
   }
 
   prototypes = new LuaSet<string>()
@@ -216,9 +225,24 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
 
   private onCreated(entity: LuaEntity) {
     const unitNumber = entity.unit_number
-    if (!unitNumber || !this.prototypes.has(entity.name)) return
-    const category = TYPE_TO_CATEGORY[entity.type]
+    if (!unitNumber) return
+    // Ghosts report their would-be prototype via ghost_type / ghost_name; real
+    // entities use type / name directly. (ghost_type / ghost_name error if read
+    // on a non-ghost, so they're only touched behind isGhost.)
+    const isGhost = entity.type == "entity-ghost"
+    const realType = isGhost ? entity.ghost_type : entity.type
+    const realName = isGhost ? entity.ghost_name : entity.name
+    const category = TYPE_TO_CATEGORY[realType]
     if (!category) return
+    // Real entities gate on the tracked-prototype set. Ghosts are tracked only
+    // when belt-category — belt ghosts affect the belt graph (and orphan
+    // neighbour references when removed), whereas inserter / pole ghosts
+    // contribute no adjacency this collector records.
+    if (isGhost) {
+      if (category != "belt") return
+    } else if (!this.prototypes.has(entity.name)) {
+      return
+    }
 
     // Revive path: Factorio's death→ghost→bot-revive cycle preserves the
     // entity's unit_number so circuit wires / station references survive
@@ -258,30 +282,39 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       )
     }
 
-    const overbuiltUids = this.markOverbuiltAt(entity, unitNumber)
+    // A real build can revive / overbuild a tracked ghost at the same tile;
+    // markOverbuiltAt tombstones that ghost record so neighbours migrate off the
+    // ghost uid. A ghost build overbuilds nothing, so skip the scan.
+    const overbuiltUids = isGhost ? [] : this.markOverbuiltAt(entity, unitNumber)
 
     const record: LayoutEntity = {
-      name: entity.name,
+      name: realName,
       unitNumber,
       category,
       location: entity.position,
       direction: entity.direction,
       timeBuilt: getTick(),
     }
+    if (isGhost) record.ghost = true
     if (category == "belt") {
-      const beltType = entity.type as BeltSubtype
+      const beltType = realType as BeltSubtype
       record.beltType = beltType
-      if (beltType == "underground-belt") {
-        record.beltToGroundType = entity.belt_to_ground_type
-      } else if (beltType == "splitter") {
-        record.splitterInputPriority = entity.splitter_input_priority
-        record.splitterOutputPriority = entity.splitter_output_priority
-        const filter = readSplitterFilterName(entity)
-        if (filter != undefined) record.splitterFilter = filter
-        this.splitterConfigCache[unitNumber] = {
-          input: record.splitterInputPriority ?? "none",
-          output: record.splitterOutputPriority ?? "none",
-          filter: record.splitterFilter ?? "",
+      // Ghosts aren't functional yet and don't expose UG type / splitter config
+      // the way real belts do — capture only their adjacency. Real belts capture
+      // full initial state.
+      if (!isGhost) {
+        if (beltType == "underground-belt") {
+          record.beltToGroundType = entity.belt_to_ground_type
+        } else if (beltType == "splitter") {
+          record.splitterInputPriority = entity.splitter_input_priority
+          record.splitterOutputPriority = entity.splitter_output_priority
+          const filter = readSplitterFilterName(entity)
+          if (filter != undefined) record.splitterFilter = filter
+          this.splitterConfigCache[unitNumber] = {
+            input: record.splitterInputPriority ?? "none",
+            output: record.splitterOutputPriority ?? "none",
+            filter: record.splitterFilter ?? "",
+          }
         }
       }
       const adj = this.readBeltAdjacency(entity)
@@ -543,6 +576,14 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   }
   on_entity_died(event: OnEntityDiedEvent) {
     this.onRemoved(event.entity)
+  }
+  // Ghost cancellation / robot-clear. Ghosts aren't mined, so they never reach
+  // the on_*_mined handlers — this is the only removal path for a tracked belt
+  // ghost. event.ghost is still valid here (pre-deconstruct), so onRemoved can
+  // tombstone it and rescan neighbours off the orphaned reference. Untracked
+  // ghosts (inserter / pole / tile) have no record and are silently ignored.
+  on_pre_ghost_deconstructed(event: OnPreGhostDeconstructedEvent) {
+    this.onRemoved(event.ghost)
   }
 
   on_player_rotated_entity(event: OnPlayerRotatedEntityEvent) {
