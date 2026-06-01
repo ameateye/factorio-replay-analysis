@@ -382,6 +382,23 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     data.mutations.push(mutation)
   }
 
+  // Fold mutations forward to recover an entity's current direction /
+  // beltToGroundType. Used by rescanArea to detect a UG mouth whose
+  // orientation flipped as a side effect of the *partner* mouth being
+  // rotated: Factorio fires on_player_rotated_entity only for the rotated
+  // mouth, so the partner's flip is otherwise unrecorded.
+  private currentOrientation(data: LayoutEntity): { direction: number; btg: "input" | "output" | undefined } {
+    let direction = data.direction
+    let btg = data.beltToGroundType
+    if (data.mutations) {
+      for (const m of data.mutations) {
+        if (m.direction != undefined) direction = m.direction
+        if (m.beltToGroundType != undefined) btg = m.beltToGroundType
+      }
+    }
+    return { direction, btg }
+  }
+
   private snapshotSplitterIfChanged(data: LayoutEntity, entity: LuaEntity) {
     if (data.beltType != "splitter") return
     const last = this.splitterConfigCache[data.unitNumber]
@@ -549,7 +566,19 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       }
       const adj = this.readBeltAdjacency(c)
       const m: MutationEvent = { tick, beltInputs: adj.inputs, beltOutputs: adj.outputs }
-      if (c.type == "underground-belt") m.undergroundPair = adj.pair
+      if (c.type == "underground-belt") {
+        m.undergroundPair = adj.pair
+        // A UG mouth's own direction / belt_to_ground_type can flip as a side
+        // effect of the *partner* mouth being rotated — Factorio fires
+        // on_player_rotated_entity only for the rotated mouth, so the partner's
+        // flip is otherwise never re-read. Capture the live orientation here and
+        // fold it into this same snapshot when it changed, so the partner can't
+        // keep a stale pre-rotation direction while its connectivity is current.
+        const cur = this.currentOrientation(d)
+        if (c.direction != cur.direction) m.direction = c.direction
+        const liveBtg = c.belt_to_ground_type
+        if (liveBtg != cur.btg) m.beltToGroundType = liveBtg
+      }
       this.appendMutation(d, m)
       this.adjCache[u] = adj
     }

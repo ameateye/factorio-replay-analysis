@@ -822,6 +822,21 @@ function EntityLayout.prototype.appendMutation(self, data, mutation)
     local ____data_mutations_3 = data.mutations
     ____data_mutations_3[#____data_mutations_3 + 1] = mutation
 end
+function EntityLayout.prototype.currentOrientation(self, data)
+    local direction = data.direction
+    local btg = data.beltToGroundType
+    if data.mutations then
+        for ____, m in ipairs(data.mutations) do
+            if m.direction ~= nil then
+                direction = m.direction
+            end
+            if m.beltToGroundType ~= nil then
+                btg = m.beltToGroundType
+            end
+        end
+    end
+    return {direction = direction, btg = btg}
+end
 function EntityLayout.prototype.snapshotSplitterIfChanged(self, data, entity)
     if data.beltType ~= "splitter" then
         return
@@ -896,14 +911,14 @@ function EntityLayout.prototype.readBeltAdjacency(self, entity)
         do
             local u = e.unit_number
             if u == nil then
-                goto __continue78
+                goto __continue84
             end
             if self:isTombstoned(u) then
-                goto __continue78
+                goto __continue84
             end
             inputs[#inputs + 1] = u
         end
-        ::__continue78::
+        ::__continue84::
     end
     table.sort(inputs)
     local outputs = {}
@@ -911,14 +926,14 @@ function EntityLayout.prototype.readBeltAdjacency(self, entity)
         do
             local u = e.unit_number
             if u == nil then
-                goto __continue82
+                goto __continue88
             end
             if self:isTombstoned(u) then
-                goto __continue82
+                goto __continue88
             end
             outputs[#outputs + 1] = u
         end
-        ::__continue82::
+        ::__continue88::
     end
     table.sort(outputs)
     local pair = 0
@@ -975,29 +990,37 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
         do
             local u = c.unit_number
             if u == nil or u == triggerUid then
-                goto __continue102
+                goto __continue108
             end
             local d = self.entityData[u]
             if not d or d.timeRemoved ~= nil then
-                goto __continue102
+                goto __continue108
             end
             local isUgPair = isTriggerUg and c.type == "underground-belt"
             if not isUgPair then
                 local last = self.adjCache[u]
                 local wasRelated = last ~= nil and (anyInSet(last.inputs, lostUids) or anyInSet(last.outputs, lostUids) or lostUids[last.pair] ~= nil)
                 if not (triggerRefs[u] ~= nil) and not wasRelated then
-                    goto __continue102
+                    goto __continue108
                 end
             end
             local adj = self:readBeltAdjacency(c)
             local m = {tick = tick, beltInputs = adj.inputs, beltOutputs = adj.outputs}
             if c.type == "underground-belt" then
                 m.undergroundPair = adj.pair
+                local cur = self:currentOrientation(d)
+                if c.direction ~= cur.direction then
+                    m.direction = c.direction
+                end
+                local liveBtg = c.belt_to_ground_type
+                if liveBtg ~= cur.btg then
+                    m.beltToGroundType = liveBtg
+                end
             end
             self:appendMutation(d, m)
             self.adjCache[u] = adj
         end
-        ::__continue102::
+        ::__continue108::
     end
 end
 function EntityLayout.prototype.on_built_entity(self, event)
