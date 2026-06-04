@@ -180,12 +180,15 @@ Per-tick contents of chests and tanks tracked over time, with detected primary i
     unitNumber: number
     location: { x, y }
     timeBuilt: number
+    timeRemoved?: number       // tick the buffer was mined / upgraded away / died; absent if alive at export
     type: "chest" | "tank"
     content: string            // detected dominant item or fluid name
     amounts: Array<[time: number, amount: number]>
   }>
 }
 ```
+
+- **v2** — Added `timeRemoved`, and removed buffers are now exported (previously a chest/tank that was mined, **upgraded** to another tier, or destroyed before export was dropped entirely — so an iron-chest later upgraded to a logistic chest left no pre-upgrade record). `unitNumber` is unique per entity, so an upgrade appears as two records at the same `location`: the old one with `timeRemoved`, the new one with `timeBuilt` at the upgrade tick.
 
 ## labContents.json
 

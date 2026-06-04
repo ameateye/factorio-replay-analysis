@@ -1,4 +1,13 @@
-import { EntityPrototypeFilterWrite, LuaEntity, MapPosition, nil, UnitNumber } from "factorio:runtime"
+import {
+  EntityPrototypeFilterWrite,
+  LuaEntity,
+  MapPosition,
+  nil,
+  OnEntityDiedEvent,
+  OnPrePlayerMinedItemEvent,
+  OnRobotPreMinedEvent,
+  UnitNumber,
+} from "factorio:runtime"
 import { DataCollector } from "../data-collector"
 import { getTick } from "../tick"
 import EntityTracker from "./entity-tracker"
@@ -13,6 +22,7 @@ interface TrackedBufferData {
   unitNumber: number
   location: MapPosition
   timeBuilt: number
+  timeRemoved?: number
   type: "chest" | "tank"
   content: string
   amounts: [time: number, amount: number][]
@@ -24,6 +34,7 @@ interface EntityData {
   unitNumber: UnitNumber
   location: MapPosition
   timeBuilt: number
+  timeRemoved?: number
   type: "chest" | "tank"
 
   itemCounts?: {
@@ -36,8 +47,9 @@ interface EntityData {
 
 export default class BufferAmounts extends EntityTracker<EntityData> implements DataCollector<BufferData> {
   manifest = {
-    schemaVersion: 1,
-    description: "Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer.",
+    schemaVersion: 2,
+    description:
+      "Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer. timeRemoved is set on the buffer record when the entity is mined, upgraded away, or dies.",
   }
 
   constructor(
@@ -143,14 +155,30 @@ export default class BufferAmounts extends EntityTracker<EntityData> implements 
     delete data.itemCounts
   }
 
+  protected override onDeleted(
+    _entity: LuaEntity,
+    _event: OnPrePlayerMinedItemEvent | OnRobotPreMinedEvent | OnEntityDiedEvent,
+    data: EntityData,
+  ) {
+    data.timeRemoved = getTick()
+    // Removed before it accrued enough samples to determine its item: try now
+    // from whatever was collected, so a short-lived buffer still exports.
+    if (!data.amounts && data.itemCounts && data.itemCounts.length > 0) {
+      this.determineItemType(data)
+    }
+  }
+
   exportData(): BufferData {
     const buffers: TrackedBufferData[] = []
-    for (const [unitNumber, entity] of pairs(this.trackedEntities)) {
-      const data = this.getEntityData(entity, unitNumber)
-      const amounts = data?.amounts
+    // Iterate entityData (not trackedEntities) so buffers removed before
+    // export — mined, upgraded away, or destroyed — are still emitted with
+    // their timeRemoved. stopTracking only clears trackedEntities; the data
+    // survives here. Mirrors MachineProduction.exportData.
+    for (const [, data] of pairs(this.entityData)) {
+      const amounts = data.amounts
       if (!amounts || !amounts[0]) continue
       const remove = table.remove
-      while (amounts[amounts.length - 1][1] == 0) {
+      while (amounts.length > 0 && amounts[amounts.length - 1][1] == 0) {
         remove(amounts)
       }
       if (!amounts[0]) continue
@@ -160,6 +188,7 @@ export default class BufferAmounts extends EntityTracker<EntityData> implements 
         unitNumber: data.unitNumber,
         location: data.location,
         timeBuilt: data.timeBuilt,
+        timeRemoved: data.timeRemoved,
         content: data.content!,
         amounts: amounts,
       })

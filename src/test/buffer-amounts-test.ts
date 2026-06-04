@@ -101,6 +101,24 @@ test("tracks content over time", () => {
   })
 })
 
+test("mined chest still exported with timeRemoved", () => {
+  const chest = createBufferChest()
+  chest.insert({ name: "iron-plate", count: 10 })
+  after_ticks(50, () => {
+    game.players[1].mine_entity(chest)
+  })
+  after_ticks(100, () => {
+    const data = dc.exportData()
+    expect(data.buffers).toMatchTable([
+      {
+        name: "iron-chest",
+        content: "iron-plate",
+        timeRemoved: 50,
+      },
+    ])
+  })
+})
+
 test("tank with single fluid counted", () => {
   const tank = assert(
     surface.create_entity({
