@@ -169,12 +169,15 @@ Notes:
 
 ## bufferAmounts.json
 
-Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer.
+Diff-compressed per-item contents of chests and tanks over time. Every item a buffer
+held gets its own `[tick, amount]` series under `contents`; a sample is appended only
+when that item's amount changes (sample-and-hold between samples — to read the amount
+at an arbitrary tick, carry the last sample forward; 0 before the first sample).
 
 ```ts
 {
   manifest,
-  period: number
+  period: number               // sampling period in ticks
   buffers: Array<{
     name: string
     unitNumber: number
@@ -182,12 +185,22 @@ Per-tick contents of chests and tanks tracked over time, with detected primary i
     timeBuilt: number
     timeRemoved?: number       // tick the buffer was mined / upgraded away / died; absent if alive at export
     type: "chest" | "tank"
-    content: string            // detected dominant item or fluid name
-    amounts: Array<[time: number, amount: number]>
+    contents: Record<string,   // item / fluid name ->
+      Array<[time: number, amount: number]>   // diff-compressed series; trailing zeros trimmed
+    >
   }>
 }
 ```
 
+- **v3** — Replaced the single-item `content` + `amounts` pair with a per-item `contents`
+  map. The collector no longer classifies a buffer down to one "primary" item and no
+  longer drops mixed-item chests: a chest holding several item types records a series per
+  type. Series are diff-compressed (a point only on change), which makes the per-item
+  shape net **smaller** than the old single-item-per-period series despite carrying more
+  detail. To consume an old (v2) file, map `{ content, amounts }` to
+  `{ contents: { [content]: amounts } }` — the dashboard's `normalizeBufferFile`
+  (`dashboard/scripts/lib/buffer.mjs`) does exactly this, so old runs still build (they
+  degrade to the one item the v2 collector resolved).
 - **v2** — Added `timeRemoved`, and removed buffers are now exported (previously a chest/tank that was mined, **upgraded** to another tier, or destroyed before export was dropped entirely — so an iron-chest later upgraded to a logistic chest left no pre-upgrade record). `unitNumber` is unique per entity, so an upgrade appears as two records at the same `location`: the old one with `timeRemoved`, the new one with `timeBuilt` at the upgrade tick.
 
 ## labContents.json

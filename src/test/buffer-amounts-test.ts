@@ -37,7 +37,7 @@ test("empty buffer chest not counted", () => {
   })
 })
 
-test("chest with single item counted", () => {
+test("chest with single item: one diff-compressed series", () => {
   const chest = createBufferChest()
   chest.insert({ name: "iron-plate", count: 10 })
   after_ticks(100, () => {
@@ -49,41 +49,28 @@ test("chest with single item counted", () => {
         unitNumber: chest.unit_number,
         location: chest.position,
         timeBuilt: 0,
-        content: "iron-plate",
-        amounts: expect.anything(),
+        contents: expect.anything(),
       },
     ])
-    const expected = Array.from({ length: 10 }, (_, i) => [(i + 1) * 10, 10])
-    expect(data.buffers[0].amounts).toEqual(expected)
+    // The amount never changes after the first sample, so the diff keeps one point.
+    expect(data.buffers[0].contents).toEqual({ "iron-plate": [[10, 10]] })
   })
 })
 
-test("chest with multiple unbalanced items not counted", () => {
+test("chest with multiple items: a series per item", () => {
   const chest = createBufferChest()
   chest.insert({ name: "iron-plate", count: 20 })
   chest.insert({ name: "copper-plate", count: 15 })
   after_ticks(100, () => {
     const data = dc.exportData()
-    expect(data.buffers).toEqual([])
+    expect(data.buffers[0].contents).toEqual({
+      "iron-plate": [[10, 20]],
+      "copper-plate": [[10, 15]],
+    })
   })
 })
 
-test("chest that is super-majority one item counted", () => {
-  const chest = createBufferChest()
-  chest.insert({ name: "iron-plate", count: 15 })
-  chest.insert({ name: "copper-plate", count: 5 })
-  after_ticks(100, () => {
-    const data = dc.exportData()
-    expect(data.buffers).toMatchTable([
-      {
-        name: "iron-chest",
-        content: "iron-plate",
-      },
-    ])
-  })
-})
-
-test("tracks content over time", () => {
+test("tracks an item's amount over time (diff-compressed)", () => {
   const chest = createBufferChest()
   after_ticks(19, () => chest.insert({ name: "iron-plate", count: 5 }))
   after_ticks(29, () => chest.insert({ name: "iron-plate", count: 10 }))
@@ -91,13 +78,25 @@ test("tracks content over time", () => {
   after_ticks(49, () => chest.remove_item({ name: "iron-plate", count: 4 }))
   after_ticks(60, () => {
     const data = dc.exportData()
-    expect(data.buffers[0].amounts).toEqual([
+    // No sample at t=60: the amount is unchanged from t=50, so the diff omits it.
+    expect(data.buffers[0].contents["iron-plate"]).toEqual([
       [20, 5],
       [30, 15],
       [40, 11],
       [50, 7],
-      [60, 7],
     ])
+  })
+})
+
+test("emptied item records a trailing zero, then is trimmed at export", () => {
+  const chest = createBufferChest()
+  chest.insert({ name: "iron-plate", count: 8 })
+  after_ticks(25, () => chest.remove_item({ name: "iron-plate", count: 8 }))
+  after_ticks(60, () => {
+    const data = dc.exportData()
+    // [10,8] then emptied to 0 at t=30; the trailing zero is trimmed on export,
+    // leaving the last non-zero sample.
+    expect(data.buffers[0].contents["iron-plate"]).toEqual([[10, 8]])
   })
 })
 
@@ -112,10 +111,10 @@ test("mined chest still exported with timeRemoved", () => {
     expect(data.buffers).toMatchTable([
       {
         name: "iron-chest",
-        content: "iron-plate",
         timeRemoved: 50,
       },
     ])
+    expect(data.buffers[0].contents["iron-plate"]).toEqual([[10, 10]])
   })
 })
 
@@ -148,11 +147,10 @@ test("tank with single fluid counted", () => {
         unitNumber: tank.unit_number,
         location: tank.position,
         timeBuilt: 0,
-        content: "water",
-        amounts: expect.anything(),
+        contents: expect.anything(),
       },
     ])
-    expect(data.buffers[0].amounts).toContainEqual([30, 100])
-    expect(data.buffers[0].amounts).toContainEqual([40, 200])
+    expect(data.buffers[0].contents["water"]).toContainEqual([10, 100])
+    expect(data.buffers[0].contents["water"]).toContainEqual([40, 200])
   })
 })

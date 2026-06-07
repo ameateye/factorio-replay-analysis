@@ -24,37 +24,34 @@ interface TrackedBufferData {
   timeBuilt: number
   timeRemoved?: number
   type: "chest" | "tank"
-  content: string
-  amounts: [time: number, amount: number][]
+  // Per-item diff-compressed amount series: contents[item] = [[tick, amount], ...].
+  // A sample is appended only when that item's amount changes since the previous
+  // period; reconstruct the value at any tick by sample-and-hold (hold the last
+  // recorded amount forward). Replaces the old single-item content/amounts pair —
+  // a chest holding several item types now records a series per type.
+  contents: Record<string, [time: number, amount: number][]>
 }
 
 interface EntityData {
-  content?: string
   name: string
   unitNumber: UnitNumber
   location: MapPosition
   timeBuilt: number
   timeRemoved?: number
   type: "chest" | "tank"
-
-  itemCounts?: {
-    time: number
-    counts: Record<string, number>
-  }[]
-
-  amounts?: [time: number, amount: number][]
+  contents: Record<string, [time: number, amount: number][]>
+  last: Record<string, number> // last recorded amount per item, for diffing
 }
 
 export default class BufferAmounts extends EntityTracker<EntityData> implements DataCollector<BufferData> {
   manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     description:
-      "Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer. timeRemoved is set on the buffer record when the entity is mined, upgraded away, or dies.",
+      "Diff-compressed per-item contents of chests and tanks over time. Each buffer carries contents[item] = [[tick, amount], ...], a sample only when that item's amount changes (sample-and-hold between samples). timeRemoved is set on the buffer record when the entity is mined, upgraded away, or dies.",
   }
 
   constructor(
     public nth_tick_period: number = 60 * 5,
-    public minDataPointsToDetermineItem: number = 5,
     public includeTanks: boolean = true,
   ) {
     const filters: EntityPrototypeFilterWrite[] = [
@@ -81,78 +78,41 @@ export default class BufferAmounts extends EntityTracker<EntityData> implements 
       unitNumber: entity.unit_number!,
       location: entity.position,
       timeBuilt: getTick(),
-      itemCounts: [],
-    }
-  }
-
-  private getMajorityKey(obj: Record<string, number>, threshold: number): string | nil {
-    let maxKey: string | nil
-    let max = 0
-    let total = 0
-    for (const [key, value] of pairs(obj)) {
-      if (value > max) {
-        max = value
-        maxKey = key
-      }
-      total += value
-    }
-    if (max >= total * threshold) {
-      return maxKey
+      contents: {},
+      last: {},
     }
   }
 
   protected override onPeriodicUpdate(entity: LuaEntity, data: EntityData) {
-    const amounts = data.amounts
-    if (amounts) {
-      const counts =
-        data.type == "tank"
-          ? entity.get_fluid_count(assert(data.content))
-          : entity.get_inventory(defines.inventory.chest)!.get_item_count(assert(data.content))
-      amounts.push([getTick(), counts])
+    const t = getTick()
+    const contents = data.contents
+    const last = data.last
+
+    let current: Record<string, number>
+    if (data.type == "tank") {
+      current = entity.get_fluid_contents()
     } else {
-      const itemCounts = assert(data.itemCounts)
-      let counts: Record<string, number>
-      if (data.type == "tank") {
-        counts = entity.get_fluid_contents()
-      } else {
-        const items = entity.get_inventory(defines.inventory.chest)!.get_contents()
-        counts = {}
-        for (const item of items) {
-          counts[item.name] = item.count
-        }
-      }
-      if (next(counts)[0] == nil) return
-      itemCounts.push({ time: getTick(), counts })
-      if (itemCounts.length == this.minDataPointsToDetermineItem) {
-        this.determineItemType(data)
-      }
-      return
-    }
-  }
-
-  private determineItemType(data: EntityData) {
-    const maxAtTime: Record<string, number> = {}
-    const itemCounts = data.itemCounts!
-    for (const { counts } of itemCounts) {
-      const maxKey = this.getMajorityKey(counts, 2 / 3)
-      if (maxKey) {
-        maxAtTime[maxKey] = (maxAtTime[maxKey] ?? 0) + 1
+      current = {}
+      for (const item of entity.get_inventory(defines.inventory.chest)!.get_contents()) {
+        current[item.name] = item.count
       }
     }
-    const finalMax = this.getMajorityKey(maxAtTime, 1 / 2)
-    if (!finalMax) {
-      // a multiplicity of items, probably not a buffer
-      this.stopTracking(data.unitNumber)
-      return
-    }
-    data.content = finalMax
 
-    data.amounts = []
-    for (const { time, counts } of itemCounts) {
-      data.amounts.push([time, counts[finalMax] ?? 0])
+    // items present now whose amount changed (or first appeared)
+    for (const [name, amt] of pairs(current)) {
+      if (last[name] != amt) {
+        const series = contents[name] ?? (contents[name] = [])
+        series.push([t, amt])
+        last[name] = amt
+      }
     }
-
-    delete data.itemCounts
+    // items that emptied out since the last period
+    for (const [name, prev] of pairs(last)) {
+      if (prev != 0 && current[name] == nil) {
+        contents[name]!.push([t, 0])
+        last[name] = 0
+      }
+    }
   }
 
   protected override onDeleted(
@@ -161,27 +121,23 @@ export default class BufferAmounts extends EntityTracker<EntityData> implements 
     data: EntityData,
   ) {
     data.timeRemoved = getTick()
-    // Removed before it accrued enough samples to determine its item: try now
-    // from whatever was collected, so a short-lived buffer still exports.
-    if (!data.amounts && data.itemCounts && data.itemCounts.length > 0) {
-      this.determineItemType(data)
-    }
   }
 
   exportData(): BufferData {
     const buffers: TrackedBufferData[] = []
-    // Iterate entityData (not trackedEntities) so buffers removed before
-    // export — mined, upgraded away, or destroyed — are still emitted with
-    // their timeRemoved. stopTracking only clears trackedEntities; the data
-    // survives here. Mirrors MachineProduction.exportData.
+    // Iterate entityData (not trackedEntities) so buffers removed before export —
+    // mined, upgraded away, or destroyed — are still emitted with their
+    // timeRemoved. Mirrors MachineProduction.exportData.
     for (const [, data] of pairs(this.entityData)) {
-      const amounts = data.amounts
-      if (!amounts || !amounts[0]) continue
-      const remove = table.remove
-      while (amounts.length > 0 && amounts[amounts.length - 1][1] == 0) {
-        remove(amounts)
+      const contents: Record<string, [time: number, amount: number][]> = {}
+      for (const [item, series] of pairs(data.contents)) {
+        const remove = table.remove
+        while (series.length > 0 && series[series.length - 1][1] == 0) {
+          remove(series)
+        }
+        if (series.length > 0) contents[item] = series
       }
-      if (!amounts[0]) continue
+      if (next(contents)[0] == nil) continue // nothing was ever stored here
       buffers.push({
         name: data.name,
         type: data.type,
@@ -189,8 +145,7 @@ export default class BufferAmounts extends EntityTracker<EntityData> implements 
         location: data.location,
         timeBuilt: data.timeBuilt,
         timeRemoved: data.timeRemoved,
-        content: data.content!,
-        amounts: amounts,
+        contents,
       })
     }
     return {

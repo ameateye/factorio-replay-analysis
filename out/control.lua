@@ -423,12 +423,9 @@ ____exports.default = __TS__Class()
 local BufferAmounts = ____exports.default
 BufferAmounts.name = "BufferAmounts"
 __TS__ClassExtends(BufferAmounts, EntityTracker)
-function BufferAmounts.prototype.____constructor(self, nth_tick_period, minDataPointsToDetermineItem, includeTanks)
+function BufferAmounts.prototype.____constructor(self, nth_tick_period, includeTanks)
     if nth_tick_period == nil then
         nth_tick_period = 60 * 5
-    end
-    if minDataPointsToDetermineItem == nil then
-        minDataPointsToDetermineItem = 5
     end
     if includeTanks == nil then
         includeTanks = true
@@ -442,9 +439,8 @@ function BufferAmounts.prototype.____constructor(self, nth_tick_period, minDataP
         table.unpack(filters)
     )
     self.nth_tick_period = nth_tick_period
-    self.minDataPointsToDetermineItem = minDataPointsToDetermineItem
     self.includeTanks = includeTanks
-    self.manifest = {schemaVersion = 1, description = "Per-tick contents of chests and tanks tracked over time, with detected primary item per buffer."}
+    self.manifest = {schemaVersion = 3, description = "Diff-compressed per-item contents of chests and tanks over time. Each buffer carries contents[item] = [[tick, amount], ...], a sample only when that item's amount changes (sample-and-hold between samples). timeRemoved is set on the buffer record when the entity is mined, upgraded away, or dies."}
 end
 function BufferAmounts.prototype.initialData(self, entity)
     local ____type = entity.type == "storage-tank" and "tank" or "chest"
@@ -454,97 +450,63 @@ function BufferAmounts.prototype.initialData(self, entity)
         unitNumber = entity.unit_number,
         location = entity.position,
         timeBuilt = getTick(),
-        itemCounts = {}
+        contents = {},
+        last = {}
     }
 end
-function BufferAmounts.prototype.getMajorityKey(self, obj, threshold)
-    local maxKey
-    local max = 0
-    local total = 0
-    for key, value in pairs(obj) do
-        if value > max then
-            max = value
-            maxKey = key
-        end
-        total = total + value
-    end
-    if max >= total * threshold then
-        return maxKey
-    end
-end
 function BufferAmounts.prototype.onPeriodicUpdate(self, entity, data)
-    local amounts = data.amounts
-    if amounts then
-        local counts = data.type == "tank" and entity.get_fluid_count(assert(data.content)) or entity.get_inventory(defines.inventory.chest).get_item_count(assert(data.content))
-        amounts[#amounts + 1] = {
-            getTick(),
-            counts
-        }
+    local t = getTick()
+    local contents = data.contents
+    local last = data.last
+    local current
+    if data.type == "tank" then
+        current = entity.get_fluid_contents()
     else
-        local itemCounts = assert(data.itemCounts)
-        local counts
-        if data.type == "tank" then
-            counts = entity.get_fluid_contents()
-        else
-            local items = entity.get_inventory(defines.inventory.chest).get_contents()
-            counts = {}
-            for ____, item in ipairs(items) do
-                counts[item.name] = item.count
+        current = {}
+        for ____, item in ipairs(entity.get_inventory(defines.inventory.chest).get_contents()) do
+            current[item.name] = item.count
+        end
+    end
+    for name, amt in pairs(current) do
+        if last[name] ~= amt then
+            local ____contents_name_1 = contents[name]
+            if ____contents_name_1 == nil then
+                local ____temp_0 = {}
+                contents[name] = ____temp_0
+                ____contents_name_1 = ____temp_0
             end
+            local series = ____contents_name_1
+            series[#series + 1] = {t, amt}
+            last[name] = amt
         end
-        if (next(counts)) == nil then
-            return
+    end
+    for name, prev in pairs(last) do
+        if prev ~= 0 and current[name] == nil then
+            local ____contents_name_2 = contents[name]
+            ____contents_name_2[#____contents_name_2 + 1] = {t, 0}
+            last[name] = 0
         end
-        itemCounts[#itemCounts + 1] = {
-            time = getTick(),
-            counts = counts
-        }
-        if #itemCounts == self.minDataPointsToDetermineItem then
-            self:determineItemType(data)
-        end
-        return
     end
 end
-function BufferAmounts.prototype.determineItemType(self, data)
-    local maxAtTime = {}
-    local itemCounts = data.itemCounts
-    for ____, ____value in ipairs(itemCounts) do
-        local counts = ____value.counts
-        local maxKey = self:getMajorityKey(counts, 2 / 3)
-        if maxKey then
-            maxAtTime[maxKey] = (maxAtTime[maxKey] or 0) + 1
-        end
-    end
-    local finalMax = self:getMajorityKey(maxAtTime, 1 / 2)
-    if not finalMax then
-        self:stopTracking(data.unitNumber)
-        return
-    end
-    data.content = finalMax
-    data.amounts = {}
-    for ____, ____value in ipairs(itemCounts) do
-        local time = ____value.time
-        local counts = ____value.counts
-        local ____data_amounts_0 = data.amounts
-        ____data_amounts_0[#____data_amounts_0 + 1] = {time, counts[finalMax] or 0}
-    end
-    data.itemCounts = nil
+function BufferAmounts.prototype.onDeleted(self, _entity, _event, data)
+    data.timeRemoved = getTick()
 end
 function BufferAmounts.prototype.exportData(self)
     local buffers = {}
-    for unitNumber, entity in pairs(self.trackedEntities) do
+    for ____, data in pairs(self.entityData) do
         do
-            local data = self:getEntityData(entity, unitNumber)
-            local amounts = data and data.amounts
-            if not amounts or not amounts[1] then
-                goto __continue26
+            local contents = {}
+            for item, series in pairs(data.contents) do
+                local remove = table.remove
+                while #series > 0 and series[#series][2] == 0 do
+                    remove(series)
+                end
+                if #series > 0 then
+                    contents[item] = series
+                end
             end
-            local remove = table.remove
-            while amounts[#amounts][2] == 0 do
-                remove(amounts)
-            end
-            if not amounts[1] then
-                goto __continue26
+            if (next(contents)) == nil then
+                goto __continue16
             end
             buffers[#buffers + 1] = {
                 name = data.name,
@@ -552,11 +514,11 @@ function BufferAmounts.prototype.exportData(self)
                 unitNumber = data.unitNumber,
                 location = data.location,
                 timeBuilt = data.timeBuilt,
-                content = data.content,
-                amounts = amounts
+                timeRemoved = data.timeRemoved,
+                contents = contents
             }
         end
-        ::__continue26::
+        ::__continue16::
     end
     return {period = self.nth_tick_period, buffers = buffers}
 end
@@ -905,42 +867,63 @@ function EntityLayout.prototype.isTombstoned(self, u)
     local d = self.entityData[u]
     return d ~= nil and d.timeRemoved ~= nil
 end
+function EntityLayout.prototype.resolveNeighbourUid(self, e)
+    local u = e.unit_number
+    if u == nil then
+        return nil
+    end
+    if e.type ~= "entity-ghost" then
+        return u
+    end
+    local p = e.position
+    for ____, r in ipairs(e.surface.find_entities_filtered({position = p, type = {"transport-belt", "underground-belt", "splitter"}})) do
+        do
+            if r.position.x ~= p.x or r.position.y ~= p.y then
+                goto __continue86
+            end
+            local ru = r.unit_number
+            if ru ~= nil and not self:isTombstoned(ru) then
+                return ru
+            end
+        end
+        ::__continue86::
+    end
+    return u
+end
 function EntityLayout.prototype.readBeltAdjacency(self, entity)
     local inputs = {}
+    local seenIn = {}
     for ____, e in ipairs(entity.belt_neighbours.inputs) do
         do
-            local u = e.unit_number
-            if u == nil then
-                goto __continue84
+            local u = self:resolveNeighbourUid(e)
+            if u == nil or self:isTombstoned(u) or seenIn[u] ~= nil then
+                goto __continue91
             end
-            if self:isTombstoned(u) then
-                goto __continue84
-            end
+            seenIn[u] = true
             inputs[#inputs + 1] = u
         end
-        ::__continue84::
+        ::__continue91::
     end
     table.sort(inputs)
     local outputs = {}
+    local seenOut = {}
     for ____, e in ipairs(entity.belt_neighbours.outputs) do
         do
-            local u = e.unit_number
-            if u == nil then
-                goto __continue88
+            local u = self:resolveNeighbourUid(e)
+            if u == nil or self:isTombstoned(u) or seenOut[u] ~= nil then
+                goto __continue94
             end
-            if self:isTombstoned(u) then
-                goto __continue88
-            end
+            seenOut[u] = true
             outputs[#outputs + 1] = u
         end
-        ::__continue88::
+        ::__continue94::
     end
     table.sort(outputs)
     local pair = 0
     if entity.type == "underground-belt" then
         local n = entity.neighbours
         if n ~= nil and n.valid then
-            local u = n.unit_number
+            local u = self:resolveNeighbourUid(n)
             if u ~= nil and not self:isTombstoned(u) then
                 pair = u
             end
@@ -990,18 +973,18 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
         do
             local u = c.unit_number
             if u == nil or u == triggerUid then
-                goto __continue108
+                goto __continue113
             end
             local d = self.entityData[u]
             if not d or d.timeRemoved ~= nil then
-                goto __continue108
+                goto __continue113
             end
             local isUgPair = isTriggerUg and c.type == "underground-belt"
             if not isUgPair then
                 local last = self.adjCache[u]
                 local wasRelated = last ~= nil and (anyInSet(last.inputs, lostUids) or anyInSet(last.outputs, lostUids) or lostUids[last.pair] ~= nil)
                 if not (triggerRefs[u] ~= nil) and not wasRelated then
-                    goto __continue108
+                    goto __continue113
                 end
             end
             local adj = self:readBeltAdjacency(c)
@@ -1020,7 +1003,7 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
             self:appendMutation(d, m)
             self.adjCache[u] = adj
         end
-        ::__continue108::
+        ::__continue113::
     end
 end
 function EntityLayout.prototype.on_built_entity(self, event)
@@ -1110,6 +1093,111 @@ function EntityLayout.prototype.exportData(self)
     return {entities = entities}
 end
 EntityLayout.BELT_RESCAN_RADIUS = 11
+return ____exports
+ end,
+["dataCollectors.game-events"] = function(...) 
+local ____lualib = require("lualib_bundle")
+local __TS__Class = ____lualib.__TS__Class
+local ____exports = {}
+local floor = math.floor
+local function pos(p)
+    return {
+        x = floor(p.x + 0.5),
+        y = floor(p.y + 0.5)
+    }
+end
+local function harvestKind(entityType)
+    if entityType == "tree" then
+        return "tree"
+    end
+    if entityType == "fish" then
+        return "fish"
+    end
+    if entityType == "simple-entity" then
+        return "rock"
+    end
+    return nil
+end
+____exports.default = __TS__Class()
+local GameEvents = ____exports.default
+GameEvents.name = "GameEvents"
+function GameEvents.prototype.____constructor(self)
+    self.manifest = {schemaVersion = 1, description = "Discrete player/world events in tick order: environmental harvests (trees, rocks, fish), enemy kills, player deaths, and fast-transfers."}
+    self.events = {}
+end
+function GameEvents.prototype.on_player_mined_entity(self, event)
+    local entity = event.entity
+    if not entity.valid then
+        return
+    end
+    local kind = harvestKind(entity.type)
+    if not kind then
+        return
+    end
+    local products = {}
+    for ____, item in ipairs(event.buffer.get_contents()) do
+        products[item.name] = (products[item.name] or 0) + item.count
+    end
+    local ____self_events_0 = self.events
+    ____self_events_0[#____self_events_0 + 1] = {
+        tick = event.tick,
+        type = "harvest",
+        player = game.get_player(event.player_index).name,
+        kind = kind,
+        entity = entity.name,
+        position = pos(entity.position),
+        products = products
+    }
+end
+function GameEvents.prototype.on_entity_died(self, event)
+    local entity = event.entity
+    if not entity.valid or entity.force.name ~= "enemy" then
+        return
+    end
+    local ____self_events_7 = self.events
+    local ____event_tick_3 = event.tick
+    local ____entity_name_4 = entity.name
+    local ____entity_type_5 = entity.type
+    local ____pos_result_6 = pos(entity.position)
+    local ____opt_1 = event.cause
+    ____self_events_7[#____self_events_7 + 1] = {
+        tick = ____event_tick_3,
+        type = "kill",
+        name = ____entity_name_4,
+        entityType = ____entity_type_5,
+        position = ____pos_result_6,
+        byPlayer = (____opt_1 and ____opt_1.type) == "character"
+    }
+end
+function GameEvents.prototype.on_player_died(self, event)
+    local player = game.get_player(event.player_index)
+    local ____self_events_10 = self.events
+    ____self_events_10[#____self_events_10 + 1] = {
+        tick = event.tick,
+        type = "death",
+        player = player and player.name or "player-" .. tostring(event.player_index),
+        position = player and pos(player.position) or nil
+    }
+end
+function GameEvents.prototype.on_player_fast_transferred(self, event)
+    local entity = event.entity
+    if not entity.valid then
+        return
+    end
+    local ____self_events_11 = self.events
+    ____self_events_11[#____self_events_11 + 1] = {
+        tick = event.tick,
+        type = "transfer",
+        player = game.get_player(event.player_index).name,
+        entity = entity.name,
+        entityType = entity.type,
+        position = pos(entity.position),
+        fromPlayer = event.from_player
+    }
+end
+function GameEvents.prototype.exportData(self)
+    return {events = self.events}
+end
 return ____exports
  end,
 ["dataCollectors.lab-contents"] = function(...) 
@@ -1845,6 +1933,8 @@ local ____buffer_2Damounts = require("dataCollectors.buffer-amounts")
 local BufferAmounts = ____buffer_2Damounts.default
 local ____entity_2Dlayout = require("dataCollectors.entity-layout")
 local EntityLayout = ____entity_2Dlayout.default
+local ____game_2Devents = require("dataCollectors.game-events")
+local GameEvents = ____game_2Devents.default
 local ____lab_2Dcontents = require("dataCollectors.lab-contents")
 local LabContents = ____lab_2Dcontents.default
 local ____machine_2Dproduction = require("dataCollectors.machine-production")
@@ -1877,6 +1967,7 @@ addDataCollector(__TS__New(MachineProduction, {
 addDataCollector(__TS__New(BufferAmounts))
 addDataCollector(__TS__New(LabContents))
 addDataCollector(__TS__New(EntityLayout))
+addDataCollector(__TS__New(GameEvents))
 addDataCollector(__TS__New(MinerActivity))
 addDataCollector(__TS__New(ResearchTiming))
 addDataCollector(__TS__New(RocketLaunchTime))
