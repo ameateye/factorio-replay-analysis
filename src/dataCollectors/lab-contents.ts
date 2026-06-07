@@ -38,7 +38,8 @@ const sciencePacks: string[] = [
 export default class LabContents extends EntityTracker<TrackedData> implements DataCollector<LabData> {
   manifest = {
     schemaVersion: 2,
-    description: "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples. timeRemoved is set on the lab record when the entity is mined or dies.",
+    description:
+      "Lab science-pack inventories sampled periodically; sciencePacks lists the column order in each lab's packs[] tuples. timeRemoved is set on the lab record when the entity is mined or dies.",
   }
 
   constructor(public nth_tick_period: number = 60) {

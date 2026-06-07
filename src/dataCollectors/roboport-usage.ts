@@ -34,7 +34,8 @@ export default class RoboportUsage
 {
   manifest = {
     schemaVersion: 1,
-    description: "Per-roboport charging and waiting bot counts sampled periodically; lifecycle includes removal reason.",
+    description:
+      "Per-roboport charging and waiting bot counts sampled periodically; lifecycle includes removal reason.",
   }
 
   constructor(public nth_tick_period = 30) {

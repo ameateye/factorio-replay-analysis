@@ -53,10 +53,7 @@ function getResourcesInRange(entity: LuaEntity): string[] {
   return out
 }
 
-export default class MinerActivity
-  extends EntityTracker<TrackedMinerData>
-  implements DataCollector<MinerActivityData>
-{
+export default class MinerActivity extends EntityTracker<TrackedMinerData> implements DataCollector<MinerActivityData> {
   manifest = {
     schemaVersion: 1,
     description: "Mining-drill statuses sampled periodically with location, direction, and the resources covered.",

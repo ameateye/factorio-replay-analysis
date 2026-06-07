@@ -231,7 +231,7 @@ test("tracks a machine if modules changed", () => {
 
     expect(data.machines[0].recipes[3]).toEqual({
       recipe: "iron-gear-wheel",
-      craftingSpeed: expect.closeTo(0.75 * (1.8-0.04), 0.1),
+      craftingSpeed: expect.closeTo(0.75 * (1.8 - 0.04), 0.1),
       productivityBonus: expect.closeTo(0.04),
       timeStarted: 420,
       production: [[480, 3, expect.anything(), expect.anything(), "working"]],
