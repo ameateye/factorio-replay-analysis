@@ -451,27 +451,61 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     return d != undefined && d.timeRemoved != undefined
   }
 
+  // Resolve a belt-neighbour (or UG-pair) entity to the unit_number to record.
+  // Normally just its own unit_number — but a belt GHOST sitting on a tile a
+  // live real belt already occupies is contradictory state Factorio resolves
+  // away, and that removal sometimes never reaches this collector (e.g. a
+  // blueprint stamped over an existing belt). The neighbour's belt graph then
+  // keeps a permanent stale edge to a vanished ghost. When the neighbour is
+  // such a ghost, record the real entity at that tile instead. A ghost ALONE on
+  // its tile is a legitimate belt-graph participant (it sideloads into real
+  // belts and is reported as a neighbour), so it is kept as-is.
+  private resolveNeighbourUid(e: LuaEntity): number | undefined {
+    const u = e.unit_number
+    if (u == undefined) return undefined
+    if (e.type != "entity-ghost") return u
+    const p = e.position
+    for (const r of e.surface.find_entities_filtered({
+      position: p,
+      type: ["transport-belt", "underground-belt", "splitter"],
+    })) {
+      // find_entities_filtered by point can return entities whose collision box
+      // merely covers p (a 2-tile splitter on the adjacent tile); require an
+      // exact tile-centre match so we only substitute the entity truly on the
+      // ghost's tile.
+      if (r.position.x != p.x || r.position.y != p.y) continue
+      const ru = r.unit_number
+      if (ru != undefined && !this.isTombstoned(ru)) return ru
+    }
+    return u
+  }
+
   // Read current belt-neighbours adjacency + UG pair for one entity. Filters
   // out tombstoned unit numbers (the dying entity itself, when on_entity_died
-  // fires the cascade and its neighbours' fresh reads still echo it back).
+  // fires the cascade and its neighbours' fresh reads still echo it back) and
+  // resolves ghost neighbours contradicted by a same-tile real belt to the real
+  // one (see resolveNeighbourUid). Dedups in case the engine reports both the
+  // ghost and the real entity for one connection.
   private readBeltAdjacency(entity: LuaEntity): {
     inputs: number[]
     outputs: number[]
     pair: number
   } {
     const inputs: number[] = []
+    const seenIn = new LuaSet<number>()
     for (const e of entity.belt_neighbours.inputs) {
-      const u = e.unit_number
-      if (u == undefined) continue
-      if (this.isTombstoned(u)) continue
+      const u = this.resolveNeighbourUid(e)
+      if (u == undefined || this.isTombstoned(u) || seenIn.has(u)) continue
+      seenIn.add(u)
       inputs.push(u)
     }
     table.sort(inputs)
     const outputs: number[] = []
+    const seenOut = new LuaSet<number>()
     for (const e of entity.belt_neighbours.outputs) {
-      const u = e.unit_number
-      if (u == undefined) continue
-      if (this.isTombstoned(u)) continue
+      const u = this.resolveNeighbourUid(e)
+      if (u == undefined || this.isTombstoned(u) || seenOut.has(u)) continue
+      seenOut.add(u)
       outputs.push(u)
     }
     table.sort(outputs)
@@ -479,7 +513,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     if (entity.type == "underground-belt") {
       const n = entity.neighbours as LuaEntity | undefined
       if (n != undefined && n.valid) {
-        const u = n.unit_number
+        const u = this.resolveNeighbourUid(n)
         if (u != undefined && !this.isTombstoned(u)) pair = u
       }
     }
