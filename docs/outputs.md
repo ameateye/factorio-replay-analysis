@@ -270,6 +270,39 @@ Per-player (x, y) position rounded to integer tiles, sampled periodically.
 }
 ```
 
+## gameEvents.json
+
+Discrete player/world events in a single tick-ordered stream, discriminated by `type`. Hooks fire during playback in tick order, so `events` is already sorted.
+
+```ts
+{
+  manifest,
+  events: GameEvent[]
+}
+
+GameEvent =
+  // Environmental harvest by hand. `kind` is classified from entity.type;
+  // `products` is the actual mined yield read from the event buffer (exact
+  // wood-per-tree / stone+coal-per-rock, not an inventory-delta guess).
+  | { tick, type: "harvest", player: string, kind: "tree" | "rock" | "fish",
+      entity: string, position: { x, y }, products: Record<string, number> }
+  // An enemy-force entity died (biter / spawner / worm). `byPlayer` is true
+  // when the killing cause was the player character.
+  | { tick, type: "kill", name: string, entityType: string,
+      position: { x, y }, byPlayer: boolean }
+  // The player character died. `position` omitted if unavailable.
+  | { tick, type: "death", player: string, position?: { x, y } }
+  // Ctrl-click fast-transfer into/out of an entity. `fromPlayer` true = player → entity.
+  | { tick, type: "transfer", player: string, entity: string, entityType: string,
+      position: { x, y }, fromPlayer: boolean }
+```
+
+Notes:
+- **Harvest excludes ore-by-hand.** `on_player_mined_entity` only fires when a resource entity is fully *depleted*, not per unit mined, so incremental ore hand-mining produces no event — keep deriving that from `playerInventory` deltas. Trees / rocks / fish are removed in a single mine, so each is captured exactly.
+- **Harvest excludes picking up own builds.** Only `tree` / `simple-entity` (rock) / `fish` types are logged; dismantling placed entities is already covered by `entityLayout.json`'s remove timing.
+- **`transfer` carries no item identity** — the Factorio event doesn't expose what moved. Join against `playerInventory` deltas at the same tick to infer it (e.g. coal into a burner = a manual refuel).
+- **`kill` fires for every enemy-force death**, including kills by turrets or attrition; filter on `byPlayer` for player-driven nest clearing.
+
 ## researchTiming.json
 
 Tech research events plus first-started and completed tick maps.

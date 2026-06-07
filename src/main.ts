@@ -2,6 +2,7 @@ import { add_lib } from "event_handler"
 import { addDataCollector, exportAllData } from "./data-collector"
 import BufferAmounts from "./dataCollectors/buffer-amounts"
 import EntityLayout from "./dataCollectors/entity-layout"
+import GameEvents from "./dataCollectors/game-events"
 import LabContents from "./dataCollectors/lab-contents"
 import MachineProduction from "./dataCollectors/machine-production"
 import MinerActivity from "./dataCollectors/miner-activity"
@@ -30,6 +31,7 @@ addDataCollector(
 addDataCollector(new BufferAmounts())
 addDataCollector(new LabContents())
 addDataCollector(new EntityLayout())
+addDataCollector(new GameEvents())
 addDataCollector(new MinerActivity())
 addDataCollector(new ResearchTiming())
 addDataCollector(new RocketLaunchTime())
