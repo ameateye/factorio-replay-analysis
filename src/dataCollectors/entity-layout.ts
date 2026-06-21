@@ -568,6 +568,30 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // UG-corridor case is catchable via the UG-exempt branch.
   private static readonly BELT_RESCAN_RADIUS = 11
 
+  // Emit one belt-graph snapshot for entity `c` (record `d`, uid `u`): append
+  // the mutation and refresh the adjacency cache. UG mouths fold in their pair
+  // and any live direction / belt_to_ground_type flip, so a partner mouth
+  // re-read as a side effect can't keep a stale pre-rotation orientation while
+  // its connectivity is current.
+  private emitBeltSnapshot(
+    d: LayoutEntity,
+    c: LuaEntity,
+    u: number,
+    adj: { inputs: number[]; outputs: number[]; pair: number },
+    tick: number,
+  ) {
+    const m: MutationEvent = { tick, beltInputs: adj.inputs, beltOutputs: adj.outputs }
+    if (c.type == "underground-belt") {
+      m.undergroundPair = adj.pair
+      const cur = this.currentOrientation(d)
+      if (c.direction != cur.direction) m.direction = c.direction
+      const liveBtg = c.belt_to_ground_type
+      if (liveBtg != cur.btg) m.beltToGroundType = liveBtg
+    }
+    this.appendMutation(d, m)
+    this.adjCache[u] = adj
+  }
+
   // Called only when the trigger is in the belt category — the only events
   // that can shift other entities' belt_neighbours. Inserter and pole events
   // only affect the entity itself.
@@ -586,6 +610,12 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // When the filter passes, we read fresh state, emit a mutation with the
   // full snapshot, and update the cache. No explicit comparison — the
   // filter is the change detector.
+  //
+  // A second, change-guarded pass then re-reads the surface neighbours of any
+  // UG mouth whose adjacency changed in the first pass: re-reading a UG (esp.
+  // via the isUgPair bypass) updates its own record but not the belts it just
+  // gained / lost an edge to, which would otherwise stay one-sided until they
+  // are independently re-read.
   private rescanArea(surface: LuaSurface, trigger: LuaEntity, alsoLost: number[] = []) {
     if (!surface.valid || !trigger.valid) return
     const triggerUid = trigger.unit_number
@@ -623,7 +653,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       left_top: { x: bbox.left_top.x - beltR, y: bbox.left_top.y - beltR },
       right_bottom: { x: bbox.right_bottom.x + beltR, y: bbox.right_bottom.y + beltR },
     }
-    for (const c of surface.find_entities_filtered({
+    const candidates = surface.find_entities_filtered({
       area: beltArea,
       // entity-ghost included so belt ghosts get rescanned too: a ghost's
       // belt_neighbours are frozen at its own build tick (it is never re-read
@@ -632,7 +662,24 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       // neighbour-change event refresh them. Non-belt ghosts the scan also
       // returns are dropped by the `!d` guard below (we never record them).
       type: ["transport-belt", "underground-belt", "splitter", "entity-ghost"],
-    })) {
+    })
+    // uid -> live entity, so the reciprocity pass below can re-read a changed
+    // UG mouth's surface neighbour without a second find.
+    const candByUid: Record<number, LuaEntity> = {}
+    for (const c of candidates) {
+      if (c.unit_number != undefined) candByUid[c.unit_number] = c
+    }
+    // Surface belts next to a UG mouth whose adjacency changed this pass. A
+    // re-read UG (esp. via the isUgPair bypass) updates its own record but not
+    // the belts it just gained / lost an edge to — they reference the UG, not
+    // the trigger, so they fail the trigger-built filter and keep a stale,
+    // one-sided edge until some later event re-reads them. Collect the UG's new
+    // neighbours (gained edges: build / revive) and its former cached neighbours
+    // (lost edges: a mouth flip empties them) for the change-guarded pass after.
+    // Duplicates are harmless — the second read is a no-op once the cache is
+    // current.
+    const recheck: number[] = []
+    for (const c of candidates) {
       const u = c.unit_number
       if (u == undefined || u == triggerUid) continue
       const d = this.entityData[u]
@@ -645,30 +692,57 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       // UG further down without either being tile-adjacent to the trigger.
       // Only happens when the trigger is itself a UG.
       const isUgPair = isTriggerUg && c.type == "underground-belt"
+      const last = this.adjCache[u]
       if (!isUgPair) {
-        const last = this.adjCache[u]
         const wasRelated =
           last != undefined &&
           (anyInSet(last.inputs, lostUids) || anyInSet(last.outputs, lostUids) || lostUids.has(last.pair))
         if (!triggerRefs.has(u) && !wasRelated) continue
       }
       const adj = this.readBeltAdjacency(c)
-      const m: MutationEvent = { tick, beltInputs: adj.inputs, beltOutputs: adj.outputs }
-      if (c.type == "underground-belt") {
-        m.undergroundPair = adj.pair
-        // A UG mouth's own direction / belt_to_ground_type can flip as a side
-        // effect of the *partner* mouth being rotated — Factorio fires
-        // on_player_rotated_entity only for the rotated mouth, so the partner's
-        // flip is otherwise never re-read. Capture the live orientation here and
-        // fold it into this same snapshot when it changed, so the partner can't
-        // keep a stale pre-rotation direction while its connectivity is current.
-        const cur = this.currentOrientation(d)
-        if (c.direction != cur.direction) m.direction = c.direction
-        const liveBtg = c.belt_to_ground_type
-        if (liveBtg != cur.btg) m.beltToGroundType = liveBtg
+      // Queue a changed UG mouth's surface neighbours (old + new) so the
+      // reciprocity pass below restores the edge on both sides this same tick.
+      // Keyed on the tracked subtype, not c.type: a ghost UG mouth reports
+      // c.type "entity-ghost", but still drives the same one-sided edge.
+      if (d.beltType == "underground-belt") {
+        const ugChanged =
+          last == undefined ||
+          !arraysEqual(adj.inputs, last.inputs) ||
+          !arraysEqual(adj.outputs, last.outputs) ||
+          adj.pair != last.pair
+        if (ugChanged) {
+          for (const e of adj.inputs) recheck.push(e)
+          for (const e of adj.outputs) recheck.push(e)
+          if (last != undefined) {
+            for (const e of last.inputs) recheck.push(e)
+            for (const e of last.outputs) recheck.push(e)
+          }
+        }
       }
-      this.appendMutation(d, m)
-      this.adjCache[u] = adj
+      this.emitBeltSnapshot(d, c, u, adj, tick)
+    }
+    // Reciprocity pass: re-read each surface belt next to a UG that changed
+    // above, emitting only on a real adjacency change so the reciprocal edge is
+    // fixed the same tick without churning unrelated belts. One level is enough
+    // — the only change is the reciprocal of the UG's edge, so the belt's other
+    // neighbours are untouched.
+    for (const uid of recheck) {
+      const c = candByUid[uid]
+      if (c == undefined || !c.valid) continue
+      const u = c.unit_number
+      if (u == undefined || u == triggerUid) continue
+      const d = this.entityData[u]
+      if (!d || d.timeRemoved != undefined) continue
+      if (this.frozenDeathGhosts[u] != undefined) continue
+      const last = this.adjCache[u]
+      const adj = this.readBeltAdjacency(c)
+      const changed =
+        last == undefined ||
+        !arraysEqual(adj.inputs, last.inputs) ||
+        !arraysEqual(adj.outputs, last.outputs) ||
+        adj.pair != last.pair
+      if (!changed) continue
+      this.emitBeltSnapshot(d, c, u, adj, tick)
     }
   }
 

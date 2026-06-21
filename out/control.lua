@@ -955,6 +955,22 @@ function EntityLayout.prototype.readBeltAdjacency(self, entity)
     end
     return {inputs = inputs, outputs = outputs, pair = pair}
 end
+function EntityLayout.prototype.emitBeltSnapshot(self, d, c, u, adj, tick)
+    local m = {tick = tick, beltInputs = adj.inputs, beltOutputs = adj.outputs}
+    if c.type == "underground-belt" then
+        m.undergroundPair = adj.pair
+        local cur = self:currentOrientation(d)
+        if c.direction ~= cur.direction then
+            m.direction = c.direction
+        end
+        local liveBtg = c.belt_to_ground_type
+        if liveBtg ~= cur.btg then
+            m.beltToGroundType = liveBtg
+        end
+    end
+    self:appendMutation(d, m)
+    self.adjCache[u] = adj
+end
 function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
     if alsoLost == nil then
         alsoLost = {}
@@ -993,44 +1009,97 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
     end
     local beltR = ____exports.default.BELT_RESCAN_RADIUS
     local beltArea = {left_top = {x = bbox.left_top.x - beltR, y = bbox.left_top.y - beltR}, right_bottom = {x = bbox.right_bottom.x + beltR, y = bbox.right_bottom.y + beltR}}
-    for ____, c in ipairs(surface.find_entities_filtered({area = beltArea, type = {"transport-belt", "underground-belt", "splitter", "entity-ghost"}})) do
+    local candidates = surface.find_entities_filtered({area = beltArea, type = {"transport-belt", "underground-belt", "splitter", "entity-ghost"}})
+    local candByUid = {}
+    for ____, c in ipairs(candidates) do
+        if c.unit_number ~= nil then
+            candByUid[c.unit_number] = c
+        end
+    end
+    local recheck = {}
+    for ____, c in ipairs(candidates) do
         do
             local u = c.unit_number
             if u == nil or u == triggerUid then
-                goto __continue121
+                goto __continue128
             end
             local d = self.entityData[u]
             if not d or d.timeRemoved ~= nil then
-                goto __continue121
+                goto __continue128
             end
             if self.frozenDeathGhosts[u] ~= nil then
-                goto __continue121
+                goto __continue128
             end
             local isUgPair = isTriggerUg and c.type == "underground-belt"
+            local last = self.adjCache[u]
             if not isUgPair then
-                local last = self.adjCache[u]
                 local wasRelated = last ~= nil and (anyInSet(last.inputs, lostUids) or anyInSet(last.outputs, lostUids) or lostUids[last.pair] ~= nil)
                 if not (triggerRefs[u] ~= nil) and not wasRelated then
-                    goto __continue121
+                    goto __continue128
                 end
             end
             local adj = self:readBeltAdjacency(c)
-            local m = {tick = tick, beltInputs = adj.inputs, beltOutputs = adj.outputs}
-            if c.type == "underground-belt" then
-                m.undergroundPair = adj.pair
-                local cur = self:currentOrientation(d)
-                if c.direction ~= cur.direction then
-                    m.direction = c.direction
-                end
-                local liveBtg = c.belt_to_ground_type
-                if liveBtg ~= cur.btg then
-                    m.beltToGroundType = liveBtg
+            if d.beltType == "underground-belt" then
+                local ugChanged = last == nil or not arraysEqual(adj.inputs, last.inputs) or not arraysEqual(adj.outputs, last.outputs) or adj.pair ~= last.pair
+                if ugChanged then
+                    for ____, e in ipairs(adj.inputs) do
+                        recheck[#recheck + 1] = e
+                    end
+                    for ____, e in ipairs(adj.outputs) do
+                        recheck[#recheck + 1] = e
+                    end
+                    if last ~= nil then
+                        for ____, e in ipairs(last.inputs) do
+                            recheck[#recheck + 1] = e
+                        end
+                        for ____, e in ipairs(last.outputs) do
+                            recheck[#recheck + 1] = e
+                        end
+                    end
                 end
             end
-            self:appendMutation(d, m)
-            self.adjCache[u] = adj
+            self:emitBeltSnapshot(
+                d,
+                c,
+                u,
+                adj,
+                tick
+            )
         end
-        ::__continue121::
+        ::__continue128::
+    end
+    for ____, uid in ipairs(recheck) do
+        do
+            local c = candByUid[uid]
+            if c == nil or not c.valid then
+                goto __continue146
+            end
+            local u = c.unit_number
+            if u == nil or u == triggerUid then
+                goto __continue146
+            end
+            local d = self.entityData[u]
+            if not d or d.timeRemoved ~= nil then
+                goto __continue146
+            end
+            if self.frozenDeathGhosts[u] ~= nil then
+                goto __continue146
+            end
+            local last = self.adjCache[u]
+            local adj = self:readBeltAdjacency(c)
+            local changed = last == nil or not arraysEqual(adj.inputs, last.inputs) or not arraysEqual(adj.outputs, last.outputs) or adj.pair ~= last.pair
+            if not changed then
+                goto __continue146
+            end
+            self:emitBeltSnapshot(
+                d,
+                c,
+                u,
+                adj,
+                tick
+            )
+        end
+        ::__continue146::
     end
 end
 function EntityLayout.prototype.refreshBeltGraphAt(self, entity)
