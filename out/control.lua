@@ -618,6 +618,7 @@ function EntityLayout.prototype.____constructor(self)
     self.adjCache = {}
     self.splitterConfigCache = {}
     self.inserterConfigCache = {}
+    self.frozenDeathGhosts = {}
 end
 function EntityLayout.prototype.on_init(self)
     for name in pairs(prototypes.get_entity_filtered(FILTERS)) do
@@ -669,16 +670,18 @@ function EntityLayout.prototype.onCreated(self, entity)
     if existing ~= nil then
         local p = entity.position
         local sameIdentity = existing.name == entity.name and existing.location.x == p.x and existing.location.y == p.y
-        if sameIdentity and existing.timeRemoved ~= nil then
+        local frozenDeadTick = self.frozenDeathGhosts[unitNumber]
+        if sameIdentity and (existing.timeRemoved ~= nil or frozenDeadTick ~= nil) then
             if not existing.revivals then
                 existing.revivals = {}
             end
             local ____existing_revivals_0 = existing.revivals
             ____existing_revivals_0[#____existing_revivals_0 + 1] = {
-                died = existing.timeRemoved,
+                died = existing.timeRemoved or frozenDeadTick or getTick(),
                 revived = getTick()
             }
             existing.timeRemoved = nil
+            self.frozenDeathGhosts[unitNumber] = nil
             if existing.category == "belt" then
                 local adj = self:readBeltAdjacency(entity)
                 local m = {
@@ -776,6 +779,7 @@ function EntityLayout.prototype.setTimeRemoved(self, data)
     if data.timeRemoved == nil then
         data.timeRemoved = getTick()
     end
+    self.frozenDeathGhosts[data.unitNumber] = nil
 end
 function EntityLayout.prototype.appendMutation(self, data, mutation)
     if not data.mutations then
@@ -882,7 +886,7 @@ function EntityLayout.prototype.resolveNeighbourUid(self, e)
                 goto __continue86
             end
             local ru = r.unit_number
-            if ru ~= nil and not self:isTombstoned(ru) then
+            if ru ~= nil and not self:isTombstoned(ru) and not r.to_be_deconstructed() then
                 return ru
             end
         end
@@ -929,6 +933,26 @@ function EntityLayout.prototype.readBeltAdjacency(self, entity)
             end
         end
     end
+    local prev = entity.unit_number ~= nil and self.adjCache[entity.unit_number] or nil
+    if prev ~= nil then
+        for ____, u in ipairs(prev.inputs) do
+            if self.frozenDeathGhosts[u] ~= nil and not (seenIn[u] ~= nil) then
+                seenIn[u] = true
+                inputs[#inputs + 1] = u
+            end
+        end
+        for ____, u in ipairs(prev.outputs) do
+            if self.frozenDeathGhosts[u] ~= nil and not (seenOut[u] ~= nil) then
+                seenOut[u] = true
+                outputs[#outputs + 1] = u
+            end
+        end
+        table.sort(inputs)
+        table.sort(outputs)
+        if pair == 0 and prev.pair ~= 0 and self.frozenDeathGhosts[prev.pair] ~= nil then
+            pair = prev.pair
+        end
+    end
     return {inputs = inputs, outputs = outputs, pair = pair}
 end
 function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
@@ -969,22 +993,25 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
     end
     local beltR = ____exports.default.BELT_RESCAN_RADIUS
     local beltArea = {left_top = {x = bbox.left_top.x - beltR, y = bbox.left_top.y - beltR}, right_bottom = {x = bbox.right_bottom.x + beltR, y = bbox.right_bottom.y + beltR}}
-    for ____, c in ipairs(surface.find_entities_filtered({area = beltArea, type = {"transport-belt", "underground-belt", "splitter"}})) do
+    for ____, c in ipairs(surface.find_entities_filtered({area = beltArea, type = {"transport-belt", "underground-belt", "splitter", "entity-ghost"}})) do
         do
             local u = c.unit_number
             if u == nil or u == triggerUid then
-                goto __continue113
+                goto __continue121
             end
             local d = self.entityData[u]
             if not d or d.timeRemoved ~= nil then
-                goto __continue113
+                goto __continue121
+            end
+            if self.frozenDeathGhosts[u] ~= nil then
+                goto __continue121
             end
             local isUgPair = isTriggerUg and c.type == "underground-belt"
             if not isUgPair then
                 local last = self.adjCache[u]
                 local wasRelated = last ~= nil and (anyInSet(last.inputs, lostUids) or anyInSet(last.outputs, lostUids) or lostUids[last.pair] ~= nil)
                 if not (triggerRefs[u] ~= nil) and not wasRelated then
-                    goto __continue113
+                    goto __continue121
                 end
             end
             local adj = self:readBeltAdjacency(c)
@@ -1003,8 +1030,46 @@ function EntityLayout.prototype.rescanArea(self, surface, trigger, alsoLost)
             self:appendMutation(d, m)
             self.adjCache[u] = adj
         end
-        ::__continue113::
+        ::__continue121::
     end
+end
+function EntityLayout.prototype.refreshBeltGraphAt(self, entity)
+    if not entity.valid then
+        return
+    end
+    local u = entity.unit_number
+    if u == nil then
+        return
+    end
+    local data = self.entityData[u]
+    if not data or data.category ~= "belt" or data.timeRemoved ~= nil then
+        return
+    end
+    if self.frozenDeathGhosts[u] ~= nil then
+        return
+    end
+    local adj = self:readBeltAdjacency(entity)
+    local last = self.adjCache[u]
+    local changed = last == nil or not arraysEqual(adj.inputs, last.inputs) or not arraysEqual(adj.outputs, last.outputs) or adj.pair ~= last.pair
+    if changed then
+        local m = {
+            tick = getTick(),
+            beltInputs = adj.inputs,
+            beltOutputs = adj.outputs
+        }
+        if data.beltType == "underground-belt" then
+            m.undergroundPair = adj.pair
+        end
+        self:appendMutation(data, m)
+        self.adjCache[u] = adj
+    end
+    self:rescanArea(entity.surface, entity)
+end
+function EntityLayout.prototype.on_marked_for_deconstruction(self, event)
+    self:refreshBeltGraphAt(event.entity)
+end
+function EntityLayout.prototype.on_cancelled_deconstruction(self, event)
+    self:refreshBeltGraphAt(event.entity)
 end
 function EntityLayout.prototype.on_built_entity(self, event)
     self:onCreated(event.entity)
@@ -1022,7 +1087,15 @@ function EntityLayout.prototype.on_robot_pre_mined(self, event)
     self:onRemoved(event.entity)
 end
 function EntityLayout.prototype.on_entity_died(self, event)
-    self:onRemoved(event.entity)
+    local entity = event.entity
+    if entity.valid and entity.unit_number ~= nil and entity.force.create_ghost_on_entity_death then
+        local data = self.entityData[entity.unit_number]
+        if data ~= nil and data.category == "belt" then
+            self.frozenDeathGhosts[entity.unit_number] = getTick()
+            return
+        end
+    end
+    self:onRemoved(entity)
 end
 function EntityLayout.prototype.on_pre_ghost_deconstructed(self, event)
     self:onRemoved(event.ghost)
@@ -1086,6 +1159,12 @@ function EntityLayout.prototype.on_entity_settings_pasted(self, event)
     self:snapshotConfig(event.destination)
 end
 function EntityLayout.prototype.exportData(self)
+    for u, deadTick in pairs(self.frozenDeathGhosts) do
+        local d = self.entityData[u]
+        if d ~= nil and d.timeRemoved == nil then
+            d.timeRemoved = deadTick
+        end
+    end
     local entities = {}
     for ____, data in pairs(self.entityData) do
         entities[#entities + 1] = data

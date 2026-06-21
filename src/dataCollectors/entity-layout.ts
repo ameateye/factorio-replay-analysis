@@ -6,9 +6,11 @@ import {
   LuaSurface,
   MapPosition,
   OnBuiltEntityEvent,
+  OnCancelledDeconstructionEvent,
   OnEntityDiedEvent,
   OnEntitySettingsPastedEvent,
   OnGuiClosedEvent,
+  OnMarkedForDeconstructionEvent,
   OnPlayerRotatedEntityEvent,
   OnPreGhostDeconstructedEvent,
   OnPrePlayerMinedItemEvent,
@@ -188,6 +190,12 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // folding mutation history. Seeded in onCreated, updated on each emission.
   splitterConfigCache: Record<number, { input: Priority; output: Priority; filter: string }> = {}
   inserterConfigCache: Record<number, { useFilters: boolean; mode: FilterMode | undefined; filters: string[] }> = {}
+  // unit_number -> deadTick for belts in a death-ghost frozen state: killed
+  // while the force revives-on-death, so Factorio made a same-uid reconstruction
+  // ghost it never belt-graph-maintains. Their belt edges are frozen (not
+  // re-read from live) and kept reciprocal (not dropped from neighbours) until
+  // the bot-revive clears the entry. In-memory only.
+  frozenDeathGhosts: Record<number, number> = {}
 
   on_init() {
     for (const [name] of prototypes.get_entity_filtered(FILTERS)) {
@@ -253,10 +261,13 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     if (existing != undefined) {
       const p = entity.position
       const sameIdentity = existing.name == entity.name && existing.location.x == p.x && existing.location.y == p.y
-      if (sameIdentity && existing.timeRemoved != undefined) {
+      const frozenDeadTick = this.frozenDeathGhosts[unitNumber]
+      if (sameIdentity && (existing.timeRemoved != undefined || frozenDeadTick != undefined)) {
         if (!existing.revivals) existing.revivals = []
-        existing.revivals.push({ died: existing.timeRemoved, revived: getTick() })
+        existing.revivals.push({ died: existing.timeRemoved ?? frozenDeadTick ?? getTick(), revived: getTick() })
         existing.timeRemoved = undefined
+        // Death-ghost freeze (if any) ends here — the entity is real again.
+        delete this.frozenDeathGhosts[unitNumber]
         // Belt graph is re-evaluated by the engine on revive; capture the
         // post-revive adjacency as a mutation so consumers can fold it
         // forward like any other graph change.
@@ -375,6 +386,9 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // record directly.
   private setTimeRemoved(data: LayoutEntity) {
     if (data.timeRemoved == undefined) data.timeRemoved = getTick()
+    // A genuine removal (mine / deconstruct / overbuild) ends any death-ghost
+    // freeze so the entity is dropped from neighbours instead of preserved.
+    delete this.frozenDeathGhosts[data.unitNumber]
   }
 
   private appendMutation(data: LayoutEntity, mutation: MutationEvent) {
@@ -460,6 +474,13 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // such a ghost, record the real entity at that tile instead. A ghost ALONE on
   // its tile is a legitimate belt-graph participant (it sideloads into real
   // belts and is reported as a neighbour), so it is kept as-is.
+  //
+  // Exception: a UG/belt ghost sitting on a real belt that is MARKED FOR
+  // DECONSTRUCTION is a fast-replace — the real belt is leaving, the ghost is the
+  // legitimate future occupant, and Factorio already points neighbours at the
+  // GHOST (verified: a marked belt is dropped from the belt graph at mark time).
+  // Substituting the dying belt there would re-create the one-sided edge this is
+  // meant to prevent, so keep the ghost as-is in that case.
   private resolveNeighbourUid(e: LuaEntity): number | undefined {
     const u = e.unit_number
     if (u == undefined) return undefined
@@ -475,7 +496,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       // ghost's tile.
       if (r.position.x != p.x || r.position.y != p.y) continue
       const ru = r.unit_number
-      if (ru != undefined && !this.isTombstoned(ru)) return ru
+      if (ru != undefined && !this.isTombstoned(ru) && !r.to_be_deconstructed()) return ru
     }
     return u
   }
@@ -516,6 +537,29 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
         const u = this.resolveNeighbourUid(n)
         if (u != undefined && !this.isTombstoned(u)) pair = u
       }
+    }
+    // Reciprocal preservation for frozen death-ghosts: Factorio stops listing a
+    // death-ghost in its neighbours' live belt_neighbours, so a fresh read here
+    // would drop the edge and make it one-sided. Re-add any previously-cached
+    // neighbour (and, for UGs, the pair) that is currently a frozen death-ghost
+    // so the edge stays on both sides for the dead window.
+    const prev = entity.unit_number != undefined ? this.adjCache[entity.unit_number] : undefined
+    if (prev != undefined) {
+      for (const u of prev.inputs) {
+        if (this.frozenDeathGhosts[u] != undefined && !seenIn.has(u)) {
+          seenIn.add(u)
+          inputs.push(u)
+        }
+      }
+      for (const u of prev.outputs) {
+        if (this.frozenDeathGhosts[u] != undefined && !seenOut.has(u)) {
+          seenOut.add(u)
+          outputs.push(u)
+        }
+      }
+      table.sort(inputs)
+      table.sort(outputs)
+      if (pair == 0 && prev.pair != 0 && this.frozenDeathGhosts[prev.pair] != undefined) pair = prev.pair
     }
     return { inputs, outputs, pair }
   }
@@ -581,12 +625,22 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     }
     for (const c of surface.find_entities_filtered({
       area: beltArea,
-      type: ["transport-belt", "underground-belt", "splitter"],
+      // entity-ghost included so belt ghosts get rescanned too: a ghost's
+      // belt_neighbours are frozen at its own build tick (it is never re-read
+      // otherwise), so a downstream placed later leaves the upstream ghost's
+      // outputs stale and the edge one-sided. Including ghosts here lets the
+      // neighbour-change event refresh them. Non-belt ghosts the scan also
+      // returns are dropped by the `!d` guard below (we never record them).
+      type: ["transport-belt", "underground-belt", "splitter", "entity-ghost"],
     })) {
       const u = c.unit_number
       if (u == undefined || u == triggerUid) continue
       const d = this.entityData[u]
       if (!d || d.timeRemoved != undefined) continue
+      // A frozen death-ghost's edges are frozen (the engine doesn't maintain
+      // them) — never re-read them here; readBeltAdjacency preserves the
+      // reciprocal edge on its neighbours instead.
+      if (this.frozenDeathGhosts[u] != undefined) continue
       // Corridor case: a new same-tier UG can steal the pair from an older
       // UG further down without either being tile-adjacent to the trigger.
       // Only happens when the trigger is itself a UG.
@@ -618,6 +672,50 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     }
   }
 
+  // A belt marked for deconstruction is dropped from Factorio's belt graph
+  // IMMEDIATELY (its belt_neighbours empty and its neighbours drop their edges to
+  // it), reciprocally, ~100+ ticks before a bot actually mines it. Cancelling the
+  // mark rejoins it just as immediately. Neither is a build or a mine, so without
+  // these handlers the graph change is unrecorded until the eventual mine —
+  // leaving the belt and its neighbours with stale, one-sided edges for the whole
+  // marked window (and mark-then-cancel, which never mines, leaves them forever).
+  // Re-read the belt itself and cascade to its former / restored neighbours, the
+  // same way a build / mine / rotate does. (Verified against live game behaviour.)
+  private refreshBeltGraphAt(entity: LuaEntity) {
+    if (!entity.valid) return
+    const u = entity.unit_number
+    if (u == undefined) return
+    const data = this.entityData[u]
+    if (!data || data.category != "belt" || data.timeRemoved != undefined) return
+    // A frozen death-ghost's edges are deliberately frozen — don't disturb them.
+    if (this.frozenDeathGhosts[u] != undefined) return
+    // Re-read the belt itself (marked => empty; cancelled => restored) and emit a
+    // mutation only when its adjacency actually changed, so redundant events don't
+    // churn the history.
+    const adj = this.readBeltAdjacency(entity)
+    const last = this.adjCache[u]
+    const changed =
+      last == undefined ||
+      !arraysEqual(adj.inputs, last.inputs) ||
+      !arraysEqual(adj.outputs, last.outputs) ||
+      adj.pair != last.pair
+    if (changed) {
+      const m: MutationEvent = { tick: getTick(), beltInputs: adj.inputs, beltOutputs: adj.outputs }
+      if (data.beltType == "underground-belt") m.undergroundPair = adj.pair
+      this.appendMutation(data, m)
+      this.adjCache[u] = adj
+    }
+    // Cascade to the former (mark) / restored (cancel) neighbours.
+    this.rescanArea(entity.surface, entity)
+  }
+
+  on_marked_for_deconstruction(event: OnMarkedForDeconstructionEvent) {
+    this.refreshBeltGraphAt(event.entity)
+  }
+  on_cancelled_deconstruction(event: OnCancelledDeconstructionEvent) {
+    this.refreshBeltGraphAt(event.entity)
+  }
+
   on_built_entity(event: OnBuiltEntityEvent) {
     this.onCreated(event.entity)
   }
@@ -638,7 +736,23 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     this.onRemoved(event.entity)
   }
   on_entity_died(event: OnEntityDiedEvent) {
-    this.onRemoved(event.entity)
+    const entity = event.entity
+    // Death-ghost: a belt killed while the force revives-on-death leaves a
+    // same-unit_number reconstruction ghost that Factorio never belt-graph-
+    // maintains (surviving neighbours stop listing it, so the edge goes
+    // one-sided for the whole dead window). Freeze the pre-death edges
+    // reciprocally — skip the tombstone+rescan drop; the edges the record and
+    // neighbours already hold stay put until the bot-revive (onCreated revive
+    // path) clears the freeze. A true death (no ghost) falls through to normal
+    // removal.
+    if (entity.valid && entity.unit_number != undefined && entity.force.create_ghost_on_entity_death) {
+      const data = this.entityData[entity.unit_number]
+      if (data != undefined && data.category == "belt") {
+        this.frozenDeathGhosts[entity.unit_number] = getTick()
+        return
+      }
+    }
+    this.onRemoved(entity)
   }
   // Ghost cancellation / robot-clear. Ghosts aren't mined, so they never reach
   // the on_*_mined handlers — this is the only removal path for a tracked belt
@@ -696,6 +810,14 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   }
 
   exportData(): EntityLayoutData {
+    // Frozen-but-never-revived death-ghosts: the reconstruction ghost was never
+    // bot-revived by export time, so the belt is genuinely gone — record its
+    // removal at the death tick (its frozen reciprocal edges only ever described
+    // the never-realised dead window).
+    for (const [u, deadTick] of pairs(this.frozenDeathGhosts)) {
+      const d = this.entityData[u as UnitNumber]
+      if (d != undefined && d.timeRemoved == undefined) d.timeRemoved = deadTick
+    }
     const entities: LayoutEntity[] = []
     for (const [, data] of pairs(this.entityData)) {
       entities.push(data)
