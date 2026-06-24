@@ -612,12 +612,13 @@ ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
 function EntityLayout.prototype.____constructor(self)
-    self.manifest = {schemaVersion = 4, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived."}
+    self.manifest = {schemaVersion = 5, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters, deconstruction marks), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived. Belts carry a third state via the folded deconMarked mutation flag: a belt marked for deconstruction is dropped from the belt graph at mark time (~100+ ticks before a bot mines it), so deconMarked:true marks a still-present real entity that no longer participates in material flow; a cancelled mark records deconMarked:false."}
     self.prototypes = {}
     self.entityData = {}
     self.adjCache = {}
     self.splitterConfigCache = {}
     self.inserterConfigCache = {}
+    self.deconCache = {}
     self.frozenDeathGhosts = {}
 end
 function EntityLayout.prototype.on_init(self)
@@ -1119,18 +1120,28 @@ function EntityLayout.prototype.refreshBeltGraphAt(self, entity)
     end
     local adj = self:readBeltAdjacency(entity)
     local last = self.adjCache[u]
-    local changed = last == nil or not arraysEqual(adj.inputs, last.inputs) or not arraysEqual(adj.outputs, last.outputs) or adj.pair ~= last.pair
-    if changed then
-        local m = {
-            tick = getTick(),
-            beltInputs = adj.inputs,
-            beltOutputs = adj.outputs
-        }
-        if data.beltType == "underground-belt" then
-            m.undergroundPair = adj.pair
+    local adjChanged = last == nil or not arraysEqual(adj.inputs, last.inputs) or not arraysEqual(adj.outputs, last.outputs) or adj.pair ~= last.pair
+    local marked = entity.to_be_deconstructed()
+    local ____self_deconCache_u_4 = self.deconCache[u]
+    if ____self_deconCache_u_4 == nil then
+        ____self_deconCache_u_4 = false
+    end
+    local markChanged = marked ~= ____self_deconCache_u_4
+    if adjChanged or markChanged then
+        local m = {tick = getTick()}
+        if adjChanged then
+            m.beltInputs = adj.inputs
+            m.beltOutputs = adj.outputs
+            if data.beltType == "underground-belt" then
+                m.undergroundPair = adj.pair
+            end
+        end
+        if markChanged then
+            m.deconMarked = marked
         end
         self:appendMutation(data, m)
         self.adjCache[u] = adj
+        self.deconCache[u] = marked
     end
     self:rescanArea(entity.surface, entity)
 end

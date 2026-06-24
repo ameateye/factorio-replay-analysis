@@ -54,6 +54,14 @@ interface MutationEvent {
   beltInputs?: number[]
   beltOutputs?: number[]
   undergroundPair?: number
+  // Belts only — deconstruction-mark transition. true when the belt is marked
+  // for deconstruction (it is dropped from Factorio's belt graph at this tick,
+  // ~100+ ticks before a bot mines it), false when the mark is cancelled
+  // (rejoined to the graph). Folded forward, this gives a belt's third state
+  // alongside real (no flag / last false) and ghost (top-level ghost:true): a
+  // marked belt is a still-present real entity that no longer participates in
+  // material flow. Absent on a mutation that didn't change the mark.
+  deconMarked?: boolean
 }
 
 interface LayoutEntity {
@@ -174,9 +182,9 @@ function anyInSet(arr: number[], set: LuaSet<number>): boolean {
 
 export default class EntityLayout implements DataCollector<EntityLayoutData>, EventHandlers {
   manifest = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     description:
-      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived.",
+      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters, deconstruction marks), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived. Belts carry a third state via the folded deconMarked mutation flag: a belt marked for deconstruction is dropped from the belt graph at mark time (~100+ ticks before a bot mines it), so deconMarked:true marks a still-present real entity that no longer participates in material flow; a cancelled mark records deconMarked:false.",
   }
 
   prototypes = new LuaSet<string>()
@@ -190,6 +198,12 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // folding mutation history. Seeded in onCreated, updated on each emission.
   splitterConfigCache: Record<number, { input: Priority; output: Priority; filter: string }> = {}
   inserterConfigCache: Record<number, { useFilters: boolean; mode: FilterMode | undefined; filters: string[] }> = {}
+  // Last-emitted deconstruction-mark state per belt unit_number. Drives "did the
+  // mark actually flip?" detection so the explicit deconMarked transition is
+  // recorded even when adjacency is unchanged (an isolated belt with no
+  // neighbours marks/cancels without any belt-graph edge moving). Defaults to
+  // false (unmarked) for any uid not present. Not exported.
+  deconCache: Record<number, boolean> = {}
   // unit_number -> deadTick for belts in a death-ghost frozen state: killed
   // while the force revives-on-death, so Factorio made a same-uid reconstruction
   // ghost it never belt-graph-maintains. Their belt edges are frozen (not
@@ -763,21 +777,34 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     if (!data || data.category != "belt" || data.timeRemoved != undefined) return
     // A frozen death-ghost's edges are deliberately frozen — don't disturb them.
     if (this.frozenDeathGhosts[u] != undefined) return
-    // Re-read the belt itself (marked => empty; cancelled => restored) and emit a
-    // mutation only when its adjacency actually changed, so redundant events don't
-    // churn the history.
+    // Re-read the belt itself (marked => empty; cancelled => restored) and the
+    // mark state itself. Emit a mutation when EITHER the adjacency changed OR the
+    // mark flipped — the latter is what lets an isolated belt (no neighbours, so
+    // empty adjacency before and after) still record its mark/cancel, and gives
+    // every belt an explicit third state instead of one inferred from emptiness.
+    // to_be_deconstructed() is read directly (not the event type) so a single
+    // handler serves both mark and cancel; resolveNeighbourUid already trusts it
+    // during these same events.
     const adj = this.readBeltAdjacency(entity)
     const last = this.adjCache[u]
-    const changed =
+    const adjChanged =
       last == undefined ||
       !arraysEqual(adj.inputs, last.inputs) ||
       !arraysEqual(adj.outputs, last.outputs) ||
       adj.pair != last.pair
-    if (changed) {
-      const m: MutationEvent = { tick: getTick(), beltInputs: adj.inputs, beltOutputs: adj.outputs }
-      if (data.beltType == "underground-belt") m.undergroundPair = adj.pair
+    const marked = entity.to_be_deconstructed()
+    const markChanged = marked != (this.deconCache[u] ?? false)
+    if (adjChanged || markChanged) {
+      const m: MutationEvent = { tick: getTick() }
+      if (adjChanged) {
+        m.beltInputs = adj.inputs
+        m.beltOutputs = adj.outputs
+        if (data.beltType == "underground-belt") m.undergroundPair = adj.pair
+      }
+      if (markChanged) m.deconMarked = marked
       this.appendMutation(data, m)
       this.adjCache[u] = adj
+      this.deconCache[u] = marked
     }
     // Cascade to the former (mark) / restored (cancel) neighbours.
     this.rescanArea(entity.surface, entity)

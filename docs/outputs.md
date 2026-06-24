@@ -40,7 +40,7 @@ Belt-category **ghosts** are tracked too (flagged `ghost: true`): a ghost belt p
 
 ```ts
 {
-  manifest,                   // schemaVersion: 4
+  manifest,                   // schemaVersion: 5
   entities: LayoutEntity[]
 }
 
@@ -106,6 +106,16 @@ LayoutEntity = {
     beltInputs?: number[]
     beltOutputs?: number[]
     undergroundPair?: number
+    // Belts only — deconstruction-mark transition. true when the belt is
+    // marked for deconstruction, false when the mark is cancelled. A marked
+    // belt is dropped from Factorio's belt graph at the mark tick (~100+ ticks
+    // before a bot mines it), so the same event usually also empties this
+    // mutation's beltInputs/beltOutputs; an isolated belt (no neighbours) still
+    // records the flip with no adjacency change. Folded forward, this is a
+    // belt's third state alongside real (last false / never set) and ghost
+    // (top-level ghost:true) — a marked belt is a still-present real entity
+    // that no longer participates in material flow.
+    deconMarked?: boolean
   }>
 }
 ```
@@ -118,7 +128,7 @@ Notes:
 
 ### Schema history
 
-- **v3** — Added `revivals[]`. `timeBuilt` now records the ORIGINAL build tick across death/revive cycles (previously it was overwritten with the latest revive tick because Factorio reuses the entity's unit_number on bot-revive).
+- **v5** — Added the belt `deconMarked` mutation flag — an explicit third state (real / ghost / marked-for-deconstruction). Previously a decon mark was only inferable from a belt's adjacency emptying, which missed isolated belts (no neighbours) and couldn't distinguish a genuine disconnect from a decon mark.- **v3** — Added `revivals[]`. `timeBuilt` now records the ORIGINAL build tick across death/revive cycles (previously it was overwritten with the latest revive tick because Factorio reuses the entity's unit_number on bot-revive).
 - **v2** — Added belt-graph snapshots (`beltInputs`, `beltOutputs`, `undergroundPair`) on both `LayoutEntity` and `MutationEvent`.
 - **v1** — Initial release: build/remove timing + rotation / splitter-config / inserter-filter mutations.
 
