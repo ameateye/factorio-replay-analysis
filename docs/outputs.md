@@ -128,7 +128,9 @@ Notes:
 
 ### Schema history
 
-- **v5** — Added the belt `deconMarked` mutation flag — an explicit third state (real / ghost / marked-for-deconstruction). Previously a decon mark was only inferable from a belt's adjacency emptying, which missed isolated belts (no neighbours) and couldn't distinguish a genuine disconnect from a decon mark.- **v3** — Added `revivals[]`. `timeBuilt` now records the ORIGINAL build tick across death/revive cycles (previously it was overwritten with the latest revive tick because Factorio reuses the entity's unit_number on bot-revive).
+- **v5** — Added the belt `deconMarked` mutation flag — an explicit third state (real / ghost / marked-for-deconstruction). Previously a decon mark was only inferable from a belt's adjacency emptying, which missed isolated belts (no neighbours) and couldn't distinguish a genuine disconnect from a decon mark.
+- **v4** — Added belt-category ghost tracking (`ghost:true`) and ghost-aware neighbour resolution so cancelled/revived ghosts don't leave stale one-sided edges.
+- **v3** — Added `revivals[]`. `timeBuilt` now records the ORIGINAL build tick across death/revive cycles (previously it was overwritten with the latest revive tick because Factorio reuses the entity's unit_number on bot-revive).
 - **v2** — Added belt-graph snapshots (`beltInputs`, `beltOutputs`, `undergroundPair`) on both `LayoutEntity` and `MutationEvent`.
 - **v1** — Initial release: build/remove timing + rotation / splitter-config / inserter-filter mutations.
 
