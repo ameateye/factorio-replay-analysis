@@ -26,6 +26,15 @@ type EntityCategory = "belt" | "inserter" | "pole"
 type BeltSubtype = "transport-belt" | "underground-belt" | "splitter"
 type Priority = "left" | "none" | "right"
 type FilterMode = "whitelist" | "blacklist"
+// Why a tracked entity left, recorded alongside timeRemoved. Shared vocabulary
+// with roboportUsage for the three common paths: "mined" = hand-mined by a player
+// (on_pre_player_mined_item), "deconstructed" = construction-bot mined under a
+// deconstruction order (on_robot_pre_mined), "destroyed" = on_entity_died (combat
+// — biters/worms/other lethal damage, the only non-deliberate removal). Two more
+// are belt/ghost-specific: "overbuilt" = implicitly displaced by a new entity
+// taking its tile (fast-replace / build-on-top), "ghost_cancelled" = a tracked
+// belt ghost was deconstructed before it could be revived.
+type RemovalReason = "mined" | "deconstructed" | "destroyed" | "overbuilt" | "ghost_cancelled"
 
 // One post-build state change. Either a rotation (direction + optional
 // beltToGroundType for UG flips), a splitter-config change, or an
@@ -81,6 +90,10 @@ interface LayoutEntity {
   direction: number
   timeBuilt: number
   timeRemoved?: number
+  // Set alongside timeRemoved (see RemovalReason). "destroyed" flags a combat loss
+  // (biters/worms) as opposed to a deliberate player/robot removal — so a record
+  // that vanishes mid-run can be told apart from a relocation. Absent while live.
+  removedReason?: RemovalReason
   // Death + bot-revive cycles. Factorio preserves unit_number across the
   // ghost-revive cycle (so wires / station references survive a biter
   // attack), and consumers should treat the entity as continuously existing
@@ -182,9 +195,9 @@ function anyInSet(arr: number[], set: LuaSet<number>): boolean {
 
 export default class EntityLayout implements DataCollector<EntityLayoutData>, EventHandlers {
   manifest = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     description:
-      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters, deconstruction marks), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived. Belts carry a third state via the folded deconMarked mutation flag: a belt marked for deconstruction is dropped from the belt graph at mark time (~100+ ticks before a bot mines it), so deconMarked:true marks a still-present real entity that no longer participates in material flow; a cancelled mark records deconMarked:false.",
+      "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, removal reason (mined / deconstructed / destroyed / overbuilt / ghost_cancelled, so a combat loss is distinguishable from a deliberate relocation), runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters, deconstruction marks), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived. Belts carry a third state via the folded deconMarked mutation flag: a belt marked for deconstruction is dropped from the belt graph at mark time (~100+ ticks before a bot mines it), so deconMarked:true marks a still-present real entity that no longer participates in material flow; a cancelled mark records deconMarked:false.",
   }
 
   prototypes = new LuaSet<string>()
@@ -238,7 +251,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
         p.y > b.left_top.y + inset &&
         p.y < b.right_bottom.y - inset
       ) {
-        this.setTimeRemoved(data)
+        this.setTimeRemoved(data, "overbuilt")
         overbuilt.push(data.unitNumber)
       }
     }
@@ -280,6 +293,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
         if (!existing.revivals) existing.revivals = []
         existing.revivals.push({ died: existing.timeRemoved ?? frozenDeadTick ?? getTick(), revived: getTick() })
         existing.timeRemoved = undefined
+        existing.removedReason = undefined
         // Death-ghost freeze (if any) ends here — the entity is real again.
         delete this.frozenDeathGhosts[unitNumber]
         // Belt graph is re-evaluated by the engine on revive; capture the
@@ -373,7 +387,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // so belt_neighbours / pickup_target / drop_target are still readable
   // here. Fast-replace fires standard mine + build events; any path that
   // skips the mine event is caught by markOverbuiltAt on the new entity.
-  private onRemoved(entity: LuaEntity) {
+  private onRemoved(entity: LuaEntity, reason: RemovalReason) {
     if (!entity.valid) return
     const unitNumber = entity.unit_number
     if (unitNumber == undefined) return
@@ -390,16 +404,20 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
       }
       return
     }
-    this.setTimeRemoved(data)
+    this.setTimeRemoved(data, reason)
     if (data.category == "belt") this.rescanArea(entity.surface, entity)
   }
 
   // Shared with markOverbuiltAt — both paths mark a tracked entity as removed
-  // by setting timeRemoved on its record. onRemoved arrives via a LuaEntity
-  // reference (needs unit_number lookup); markOverbuiltAt arrives with the
-  // record directly.
-  private setTimeRemoved(data: LayoutEntity) {
-    if (data.timeRemoved == undefined) data.timeRemoved = getTick()
+  // by setting timeRemoved (+ removedReason) on its record. onRemoved arrives via
+  // a LuaEntity reference (needs unit_number lookup); markOverbuiltAt arrives with
+  // the record directly. Reason is recorded only on the FIRST removal, alongside
+  // the tick, so a later cascade can't overwrite how the entity actually left.
+  private setTimeRemoved(data: LayoutEntity, reason: RemovalReason) {
+    if (data.timeRemoved == undefined) {
+      data.timeRemoved = getTick()
+      data.removedReason = reason
+    }
     // A genuine removal (mine / deconstruct / overbuild) ends any death-ghost
     // freeze so the entity is dropped from neighbours instead of preserved.
     delete this.frozenDeathGhosts[data.unitNumber]
@@ -831,10 +849,10 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // consumed by the replacement instead of entering the player's inventory.
   // Pre-mine fires reliably for both normal mining and fast-replace.
   on_pre_player_mined_item(event: OnPrePlayerMinedItemEvent) {
-    this.onRemoved(event.entity)
+    this.onRemoved(event.entity, "mined")
   }
   on_robot_pre_mined(event: OnRobotPreMinedEvent) {
-    this.onRemoved(event.entity)
+    this.onRemoved(event.entity, "deconstructed")
   }
   on_entity_died(event: OnEntityDiedEvent) {
     const entity = event.entity
@@ -853,7 +871,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
         return
       }
     }
-    this.onRemoved(entity)
+    this.onRemoved(entity, "destroyed")
   }
   // Ghost cancellation / robot-clear. Ghosts aren't mined, so they never reach
   // the on_*_mined handlers — this is the only removal path for a tracked belt
@@ -861,7 +879,7 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
   // tombstone it and rescan neighbours off the orphaned reference. Untracked
   // ghosts (inserter / pole / tile) have no record and are silently ignored.
   on_pre_ghost_deconstructed(event: OnPreGhostDeconstructedEvent) {
-    this.onRemoved(event.ghost)
+    this.onRemoved(event.ghost, "ghost_cancelled")
   }
 
   on_player_rotated_entity(event: OnPlayerRotatedEntityEvent) {
@@ -917,7 +935,10 @@ export default class EntityLayout implements DataCollector<EntityLayoutData>, Ev
     // the never-realised dead window).
     for (const [u, deadTick] of pairs(this.frozenDeathGhosts)) {
       const d = this.entityData[u as UnitNumber]
-      if (d != undefined && d.timeRemoved == undefined) d.timeRemoved = deadTick
+      if (d != undefined && d.timeRemoved == undefined) {
+        d.timeRemoved = deadTick
+        d.removedReason = "destroyed"
+      }
     }
     const entities: LayoutEntity[] = []
     for (const [, data] of pairs(this.entityData)) {

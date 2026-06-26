@@ -612,7 +612,7 @@ ____exports.default = __TS__Class()
 local EntityLayout = ____exports.default
 EntityLayout.name = "EntityLayout"
 function EntityLayout.prototype.____constructor(self)
-    self.manifest = {schemaVersion = 5, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters, deconstruction marks), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived. Belts carry a third state via the folded deconMarked mutation flag: a belt marked for deconstruction is dropped from the belt graph at mark time (~100+ ticks before a bot mines it), so deconMarked:true marks a still-present real entity that no longer participates in material flow; a cancelled mark records deconMarked:false."}
+    self.manifest = {schemaVersion = 6, description = "Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, removal reason (mined / deconstructed / destroyed / overbuilt / ghost_cancelled, so a combat loss is distinguishable from a deliberate relocation), runtime belt-graph snapshots (belt neighbours, UG pairs), post-build mutations (rotations, splitter config, inserter filters, deconstruction marks), and death/revive cycles (biter kill → bot-revived ghost; unit_number is preserved by Factorio across the cycle). Belt-category ghosts are tracked too (flagged ghost:true) because they participate in the belt graph (sideloads, neighbour reports); their connection and its removal are recorded so real entities don't keep stale neighbour references after a ghost is cancelled or revived. Belts carry a third state via the folded deconMarked mutation flag: a belt marked for deconstruction is dropped from the belt graph at mark time (~100+ ticks before a bot mines it), so deconMarked:true marks a still-present real entity that no longer participates in material flow; a cancelled mark records deconMarked:false."}
     self.prototypes = {}
     self.entityData = {}
     self.adjCache = {}
@@ -640,7 +640,7 @@ function EntityLayout.prototype.markOverbuiltAt(self, newEntity, newUnitNumber)
             end
             local p = data.location
             if p.x > b.left_top.x + inset and p.x < b.right_bottom.x - inset and p.y > b.left_top.y + inset and p.y < b.right_bottom.y - inset then
-                self:setTimeRemoved(data)
+                self:setTimeRemoved(data, "overbuilt")
                 overbuilt[#overbuilt + 1] = data.unitNumber
             end
         end
@@ -682,6 +682,7 @@ function EntityLayout.prototype.onCreated(self, entity)
                 revived = getTick()
             }
             existing.timeRemoved = nil
+            existing.removedReason = nil
             self.frozenDeathGhosts[unitNumber] = nil
             if existing.category == "belt" then
                 local adj = self:readBeltAdjacency(entity)
@@ -755,7 +756,7 @@ function EntityLayout.prototype.onCreated(self, entity)
         self:rescanArea(entity.surface, entity, overbuiltUids)
     end
 end
-function EntityLayout.prototype.onRemoved(self, entity)
+function EntityLayout.prototype.onRemoved(self, entity, reason)
     if not entity.valid then
         return
     end
@@ -771,14 +772,15 @@ function EntityLayout.prototype.onRemoved(self, entity)
         end
         return
     end
-    self:setTimeRemoved(data)
+    self:setTimeRemoved(data, reason)
     if data.category == "belt" then
         self:rescanArea(entity.surface, entity)
     end
 end
-function EntityLayout.prototype.setTimeRemoved(self, data)
+function EntityLayout.prototype.setTimeRemoved(self, data, reason)
     if data.timeRemoved == nil then
         data.timeRemoved = getTick()
+        data.removedReason = reason
     end
     self.frozenDeathGhosts[data.unitNumber] = nil
 end
@@ -1161,10 +1163,10 @@ function EntityLayout.prototype.script_raised_built(self, event)
     self:onCreated(event.entity)
 end
 function EntityLayout.prototype.on_pre_player_mined_item(self, event)
-    self:onRemoved(event.entity)
+    self:onRemoved(event.entity, "mined")
 end
 function EntityLayout.prototype.on_robot_pre_mined(self, event)
-    self:onRemoved(event.entity)
+    self:onRemoved(event.entity, "deconstructed")
 end
 function EntityLayout.prototype.on_entity_died(self, event)
     local entity = event.entity
@@ -1175,10 +1177,10 @@ function EntityLayout.prototype.on_entity_died(self, event)
             return
         end
     end
-    self:onRemoved(entity)
+    self:onRemoved(entity, "destroyed")
 end
 function EntityLayout.prototype.on_pre_ghost_deconstructed(self, event)
-    self:onRemoved(event.ghost)
+    self:onRemoved(event.ghost, "ghost_cancelled")
 end
 function EntityLayout.prototype.on_player_rotated_entity(self, event)
     local entity = event.entity
@@ -1243,6 +1245,7 @@ function EntityLayout.prototype.exportData(self)
         local d = self.entityData[u]
         if d ~= nil and d.timeRemoved == nil then
             d.timeRemoved = deadTick
+            d.removedReason = "destroyed"
         end
     end
     local entities = {}

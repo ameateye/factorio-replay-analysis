@@ -34,13 +34,13 @@ Every output JSON starts with a `manifest` field describing the file:
 
 ## entityLayout.json
 
-Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing, runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters). Inserter pickup / drop targets are **not** captured here — derive them downstream from the inserter's `location` + `direction` + prototype reach.
+Belts, splitters, undergrounds, inserters, and electric poles — built/removed timing (with a removal reason, so a combat loss is distinguishable from a relocation), runtime belt-graph snapshots (belt neighbours, UG pairs), and post-build mutations (rotations, splitter config, inserter filters). Inserter pickup / drop targets are **not** captured here — derive them downstream from the inserter's `location` + `direction` + prototype reach.
 
 Belt-category **ghosts** are tracked too (flagged `ghost: true`): a ghost belt participates in the engine belt graph — it sideloads and is reported in real neighbours' `belt_neighbours` — so its connection *and its later removal* (cancel or revive) are recorded, otherwise the real entity keeps a stale neighbour reference. Consumers that only want material flow can filter on the `ghost` flag.
 
 ```ts
 {
-  manifest,                   // schemaVersion: 5
+  manifest,                   // schemaVersion: 6
   entities: LayoutEntity[]
 }
 
@@ -54,6 +54,15 @@ LayoutEntity = {
   direction: number           // build-time direction; later rotations live in mutations[]
   timeBuilt: number           // tick of the ORIGINAL build; survives revivals
   timeRemoved?: number
+  // Why the entity left, set with timeRemoved. "destroyed" is the only
+  // non-deliberate loss (on_entity_died — biters/worms/other lethal damage),
+  // so a record that vanishes mid-run can be told apart from a relocation.
+  // "mined" = hand-mined by a player; "deconstructed" = construction-bot mined
+  // under a deconstruction order; "overbuilt" = displaced by a new entity taking
+  // its tile (fast-replace / build-on-top); "ghost_cancelled" = a tracked belt
+  // ghost deconstructed before revival. (mined / deconstructed / destroyed match
+  // roboportUsage's removedReason.) Absent while the entity is alive.
+  removedReason?: "mined" | "deconstructed" | "destroyed" | "overbuilt" | "ghost_cancelled"
 
   // Death + bot-revive cycles. Factorio's death→ghost→bot-revive flow
   // preserves unit_number (so circuit wires / station references survive
@@ -128,6 +137,7 @@ Notes:
 
 ### Schema history
 
+- **v6** — Added `removedReason` on `LayoutEntity` (`mined` / `deconstructed` / `destroyed` / `overbuilt` / `ghost_cancelled`), set alongside `timeRemoved`. Lets a combat loss (`destroyed`) be told apart from a deliberate relocation; the first three values match `roboportUsage.removedReason`.
 - **v5** — Added the belt `deconMarked` mutation flag — an explicit third state (real / ghost / marked-for-deconstruction). Previously a decon mark was only inferable from a belt's adjacency emptying, which missed isolated belts (no neighbours) and couldn't distinguish a genuine disconnect from a decon mark.
 - **v4** — Added belt-category ghost tracking (`ghost:true`) and ghost-aware neighbour resolution so cancelled/revived ghosts don't leave stale one-sided edges.
 - **v3** — Added `revivals[]`. `timeBuilt` now records the ORIGINAL build tick across death/revive cycles (previously it was overwritten with the latest revive tick because Factorio reuses the entity's unit_number on bot-revive).
